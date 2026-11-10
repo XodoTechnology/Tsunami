@@ -273,10 +273,10 @@ pub fn write_scrape_response(
     off
 }
 
-/// Extract an IPv4 address + port from announce ip_field if nonzero,
-/// else use the source address. (We always prefer the source address —
-/// the ip_field is advisory only and source is authoritative for UDP.)
-#[allow(dead_code)]
+/// Resolve the peer address for a BEP-15 announce: the client-supplied
+/// `ip` field when it is non-zero, else the packet's source address.
+/// Callers must gate this on `protocol.allow_client_ip` — honoring the
+/// field unconditionally would let any client forge swarm peer addresses.
 pub fn request_ip(ip_field: &[u8; 4], src: IpAddr) -> IpAddr {
     if ip_field == &[0, 0, 0, 0] {
         src

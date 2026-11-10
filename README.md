@@ -29,6 +29,15 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
   returns `204 No Content` for protocol-level drops (same as a UDP client
   seeing no reply). Lets UDP-protocol tooling run over HTTP(S) or through
   proxies that can't do UDP.
+- **Real client IP behind a proxy** (`http.proxy_ip_header`) — when
+  Tsunami sits behind a reverse proxy / load balancer you control, set this
+  to e.g. `"X-Forwarded-For"` and peers register their true IP instead of
+  the proxy's, for `/announce`, `/scrape`, `/bep15` and WebSocket.
+- **Client-supplied announce IP** (`protocol.allow_client_ip`) — privacy
+  feature: honor the BEP-15 `ip` field / BEP-3 `ip=` param as the peer's
+  swarm address so clients can announce a relay/non-source IP. The real
+  connection IP still drives conn-id validation, rate limits and access
+  checks, so stats stay honest. Off by default (swarm-poisoning risk).
 - **Unified store**: UDP, HTTP, and WebSocket peers share one swarm store,
   so stats are consistent across protocols.
 - **Peer-state snapshot/restore**: periodic + on-shutdown dump of the full

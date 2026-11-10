@@ -153,6 +153,13 @@ fn handle_conn(
     };
 
     let head = &buf[..header_end];
+    // When a trusted proxy header is configured, the real client IP comes
+    // from it rather than the TCP peer — applies to WebSocket, /bep15 and
+    // every HTTP route uniformly.
+    let peer = match forwarded_client_ip(head, &config.http.proxy_ip_header) {
+        Some(ip) => SocketAddr::new(ip, peer.port()),
+        None => peer,
+    };
     if crate::ws::is_websocket_upgrade(head) {
         return crate::ws::handle_upgrade(
             stream,
@@ -243,7 +250,16 @@ fn route(
     }
     let head_only = req.method == "HEAD";
     let resp = match req.path {
-        "/announce" => announce_http(req.query, peer.ip(), store, stats, access_list, rng, scratch),
+        "/announce" => announce_http(
+            req.query,
+            peer.ip(),
+            config.protocol.allow_client_ip,
+            store,
+            stats,
+            access_list,
+            rng,
+            scratch,
+        ),
         "/scrape" => scrape_http(req.query, store, config.http.full_scrape),
         "/api/stats" => (
             200,
@@ -286,6 +302,29 @@ fn route(
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Resolve the real client IP from a trusted proxy header (e.g.
+/// "X-Forwarded-For", "X-Real-IP"). Returns the first address of the first
+/// matching header, or None when the header is absent/unparseable so the
+/// caller falls back to the TCP peer address.
+fn forwarded_client_ip(head: &[u8], header_name: &str) -> Option<IpAddr> {
+    if header_name.is_empty() {
+        return None;
+    }
+    let text = std::str::from_utf8(head).ok()?;
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case(header_name) {
+            continue;
+        }
+        // X-Forwarded-For is a comma list; the leftmost entry is the client.
+        let first = v.split(',').next()?.trim();
+        return first.parse::<IpAddr>().ok();
+    }
+    None
 }
 
 /// Extract `Content-Length: N` from raw request headers (case-insensitive).
@@ -404,6 +443,7 @@ fn as_20(v: &[u8]) -> Option<[u8; 20]> {
 fn announce_http(
     query: &str,
     src_ip: IpAddr,
+    allow_client_ip: bool,
     store: &Arc<Store>,
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
@@ -428,6 +468,17 @@ fn announce_http(
     };
     let numwant = params.get_i64(b"numwant").unwrap_or(-1) as i32;
     let compact = params.get_i64(b"compact").unwrap_or(1) != 0;
+    // Optional client-supplied IP (BEP-3 `ip=`) becomes the swarm address
+    // only when allow_client_ip is on; the connection IP stays authoritative
+    // for access checks and stats.
+    let announce_ip = if allow_client_ip {
+        params
+            .get_str(b"ip")
+            .and_then(|s| s.parse::<IpAddr>().ok())
+            .unwrap_or(src_ip)
+    } else {
+        src_ip
+    };
 
     if !access_list.allows(&info_hash) {
         return (403, "text/plain", b"info hash not allowed".to_vec());
@@ -445,7 +496,7 @@ fn announce_http(
 
     match store.announce(
         &info_hash,
-        src_ip,
+        announce_ip,
         port,
         peer_id,
         left,

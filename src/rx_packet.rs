@@ -647,8 +647,16 @@ pub fn process_packet(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as u32)
                     .unwrap_or(0);
+                // Optional client-supplied IP becomes the swarm address only
+                // when allow_client_ip is on; `ip` stays authoritative for
+                // conn_id validation.
+                let announce_ip = if config.protocol.allow_client_ip {
+                    protocol::request_ip(&req.ip_field, ip)
+                } else {
+                    ip
+                };
                 match store.announce(
-                    &info_hash, ip, req.port, req.peer_id, req.left, event, req.numwant,
+                    &info_hash, announce_ip, req.port, req.peer_id, req.left, event, req.numwant,
                     now, rng, peer_scratch,
                 ) {
                     Some((interval, seeders, leechers, added, removed)) => {

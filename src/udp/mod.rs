@@ -363,9 +363,17 @@ impl Worker {
                 let txid = req.transaction_id;
                 let (ip, port, peer_id, left, numwant) =
                     (ip, req.port, req.peer_id, req.left, req.numwant);
+                // Optional client-supplied IP becomes the swarm address only
+                // when allow_client_ip is on; `ip` stays authoritative for
+                // conn_id validation.
+                let announce_ip = if self.config.protocol.allow_client_ip {
+                    protocol::request_ip(&req.ip_field, ip)
+                } else {
+                    ip
+                };
                 let res = self.store.announce(
                     &info_hash,
-                    ip,
+                    announce_ip,
                     port,
                     peer_id,
                     left,

@@ -290,9 +290,16 @@ pub(crate) fn dispatch(
             let port = if req.port == 0 { peer.port() } else { req.port };
             let event = swarm::AnnounceEvent::from_wire(req.event as i32);
             let now = unix_now();
+            // Optional client-supplied IP becomes the swarm address only when
+            // allow_client_ip is on; `ip` stays authoritative for conn_id.
+            let announce_ip = if config.protocol.allow_client_ip {
+                protocol::request_ip(&req.ip_field, ip)
+            } else {
+                ip
+            };
             match store.announce(
                 &info_hash,
-                ip,
+                announce_ip,
                 port,
                 req.peer_id,
                 req.left,

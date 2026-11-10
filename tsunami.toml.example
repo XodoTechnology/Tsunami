@@ -42,6 +42,13 @@ max_connection_age = 300
 store_peer_id = false
 # Count announces per client (BEP20 prefix) for /api/clients. Cheap.
 client_stats = true
+# Honor a client-supplied IP in announce (BEP-15 `ip` field / BEP-3 `ip=`)
+# as the peer's swarm address — for privacy-aware clients announcing via a
+# relay or wanting a non-source IP published. The connection IP is still
+# used for conn-id validation, rate limits and access checks.
+# WARNING: lets any client inject arbitrary IPs (swarm poisoning). Keep
+# false unless you trust your peer population; pair with access_list.
+allow_client_ip = false
 
 [http]
 enable = true
@@ -53,6 +60,11 @@ max_request_bytes = 16384
 # tracked torrents (BEP-12 "full scrape", same format opentracker uses).
 # HTTP only — UDP scrape is per-hash-list by design (see DEPLOYMENT.md).
 full_scrape = false
+# Header carrying the real client IP when behind a reverse proxy / LB you
+# control, e.g. "X-Forwarded-For" or "X-Real-IP". Empty = use TCP peer addr.
+# ONLY set this when the proxy always overwrites the header, else clients
+# can spoof their IP. Applies to /announce, /scrape, /bep15 and WebSocket.
+proxy_ip_header = ""
 
 [cleaning]
 # Seconds between peer-expiry passes

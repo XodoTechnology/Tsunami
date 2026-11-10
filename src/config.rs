@@ -61,6 +61,17 @@ pub struct ProtocolConfig {
     pub store_peer_id: bool,
     /// Count announces per peer client for /api/stats client breakdown.
     pub client_stats: bool,
+    /// Honor a client-supplied IP in the announce as the peer's swarm
+    /// address (BEP-15 `ip` field / BEP-3 `ip=` param), for privacy-aware
+    /// clients that announce through a relay or want a non-source address
+    /// published. The connection source IP is still used for connection-id
+    /// validation, rate limiting and access decisions — only the address
+    /// handed to the swarm changes.
+    ///
+    /// OFF by default: enabling lets ANY client inject arbitrary IPs into
+    /// peer lists (swarm poisoning). Only enable for a trusted peer
+    /// population, ideally paired with the access list.
+    pub allow_client_ip: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,6 +85,17 @@ pub struct HttpConfig {
     /// Allow `GET /scrape` with no info_hash params to return stats for
     /// ALL tracked torrents (BEP-12 "full scrape"). HTTP only — see docs.
     pub full_scrape: bool,
+    /// Name of a header carrying the real client IP when Tsunami sits
+    /// behind a reverse proxy / load balancer you control — e.g.
+    /// "X-Forwarded-For" or "X-Real-IP". When set, the first address in
+    /// that header is used as the client IP for announce/scrape/`/bep15`/
+    /// WebSocket instead of the TCP peer address, so peers register their
+    /// true IP rather than the proxy's.
+    ///
+    /// Leave empty to use the TCP peer address. ONLY enable when the proxy
+    /// always sets or overwrites this header — otherwise clients can spoof
+    /// it to forge peer identity and evade per-IP controls.
+    pub proxy_ip_header: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -191,6 +213,7 @@ impl Default for ProtocolConfig {
             max_connection_age: 4 * 3600,
             store_peer_id: false,
             client_stats: true,
+            allow_client_ip: false,
         }
     }
 }
@@ -203,6 +226,7 @@ impl Default for HttpConfig {
             threads: 4,
             max_request_bytes: 256 * 1024,
             full_scrape: false,
+            proxy_ip_header: String::new(),
         }
     }
 }

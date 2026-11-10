@@ -173,15 +173,63 @@ Semantics match UDP:
 
 **Source-IP caveat:** like UDP, the tracker keys connection ids and peer
 identity to the *connection's source IP*. If you terminate TLS or proxy in
-front of `/bep15` (nginx, Cloudflare, a load balancer), every peer will
-appear as the proxy's IP unless the proxy preserves the real client address
-(e.g. PROXY protocol or a trusted `X-Forwarded-For` you terminate yourself).
-For peer-accurate announces, expose `/bep15` directly or ensure the real
-client IP reaches the tracker. (Regular `GET /announce`+`/scrape` over HTTP
-have the same consideration.)
+front of `/bep15` (nginx, Cloudflare, a load balancer) **without** the
+real-IP fix below, every peer will appear as the proxy's IP. See
+"Client IPs behind a proxy" next.
 
 One request per connection; send `Connection: close` or let the client
 re-open — there's no keep-alive pipelining on this endpoint.
+
+## Client IPs behind a proxy (`http.proxy_ip_header`)
+
+When Tsunami sits behind a reverse proxy / TLS terminator / load balancer,
+the TCP peer address is the proxy's — without help, every peer collapses to
+one IP. Set `http.proxy_ip_header` to the header your proxy uses for the
+real client address:
+
+```toml
+[http]
+proxy_ip_header = "X-Forwarded-For"   # or "X-Real-IP", "CF-Connecting-IP", …
+```
+
+The leftmost address of that header becomes the client IP for `/announce`,
+`/scrape`, `/bep15` and WebSocket — used for connection-id validation, peer
+identity and rate limiting. If the header is absent or unparseable the TCP
+peer address is used, so direct (non-proxied) clients keep working.
+
+**Only enable this when the proxy always sets/overwrites the header.** If
+clients can reach Tsunami directly *and* inject the header, they can forge
+their IP — restrict direct access to the proxy (firewall / bind to the
+proxy's address) or use PROXY-protocol-aware ingress.
+
+UDP is unaffected — it has no proxy-header concept (use `af_packet` or a
+PROXY-protocol LB if you need it there).
+
+## Client-supplied announce IP (`protocol.allow_client_ip`)
+
+Privacy feature for clients that want to announce an address other than
+their connection IP (e.g. a relay, VPN exit, or anycast anycast-fronted
+endpoint). When enabled, the BEP-15 announce `ip` field (bytes 84..88) and
+the BEP-3 `ip=` query param are honored as the peer's **swarm** address.
+
+The **real connection IP is still authoritative** for everything that
+matters for abuse control: connection-id validation, rate limiting, and
+access-list decisions. So the tracker's numbers stay honest — peers,
+leechers/seeders and request rates all reflect real announces, not forged
+ones.
+
+```toml
+[protocol]
+allow_client_ip = true
+```
+
+**Off by default and should stay off for open trackers** — it lets any
+client inject arbitrary IPs into peer lists (swarm poisoning: fake peers,
+polluted scrape results). Enable only for a peer population you trust, and
+prefer pairing it with `[access_list]` so only approved info-hashes accept
+these announces. The two features compose: `proxy_ip_header` gives the
+*real* source IP; `allow_client_ip` lets a client then publish a *different*
+swarm address on top of it.
 
 ## Tuning checklist
 
