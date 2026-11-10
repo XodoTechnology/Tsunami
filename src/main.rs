@@ -49,6 +49,13 @@ fn main() -> anyhow::Result<()> {
         config.protocol.max_peer_age,
         config.protocol.max_response_peers,
     ));
+
+    // Restore peer state from a previous snapshot (if enabled + file exists).
+    // Done before workers bind so restored peers are live immediately.
+    if config.snapshot.enable {
+        restore_snapshot(&store, &config.snapshot.path);
+    }
+
     let access_list = Arc::new(AccessList::new(
         &config.access_list.mode,
         config.access_list.file.clone(),
@@ -109,6 +116,14 @@ fn main() -> anyhow::Result<()> {
 
     // Maintenance thread: periodic stats logging + scrape export.
     spawn_maintenance(&config, &store, &stats);
+
+    // Snapshot thread: periodic peer-state dump (if enabled).
+    if config.snapshot.enable {
+        spawn_snapshotter(&config, &store);
+    }
+
+    // SIGINT/SIGTERM -> final snapshot (if enabled) then exit.
+    spawn_shutdown_handler(&config, &store);
 
     // SIGHUP -> reload access list (only if enabled in config)
     if config.access_list.reload_on_sighup {
@@ -240,4 +255,99 @@ fn spawn_maintenance(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {
             }
         })
         .expect("spawn maintenance");
+}
+
+// ---------------- peer-state snapshot ----------------
+
+/// Load a snapshot file into the store if it exists. Logs the outcome.
+fn restore_snapshot(store: &Store, path: &std::path::Path) {
+    if !path.exists() {
+        log::info!("snapshot: no file at {}, starting empty", path.display());
+        return;
+    }
+    let f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("snapshot: cannot open {}: {e}", path.display());
+            return;
+        }
+    };
+    let mut r = std::io::BufReader::with_capacity(1 << 20, f);
+    match store.load_snapshot(&mut r) {
+        Ok((torrents, peers)) => {
+            log::info!(
+                "snapshot: restored {} torrents / {} peers from {}",
+                torrents,
+                peers,
+                path.display()
+            );
+        }
+        Err(e) => log::warn!("snapshot: load failed ({}): {e}", path.display()),
+    }
+}
+
+/// Write the snapshot atomically: serialize to <path>.tmp then rename.
+fn write_snapshot_file(store: &Store, path: &std::path::Path) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let f = std::fs::File::create(&tmp)?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
+        store.write_snapshot(&mut w)?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Periodically dump peer state. interval_secs == 0 disables periodic dumps
+/// (shutdown snapshot still happens via the signal handler).
+fn spawn_snapshotter(config: &Config, store: &Arc<Store>) {
+    let interval = Duration::from_secs(config.snapshot.interval_secs);
+    let path = config.snapshot.path.clone();
+    let store = store.clone();
+    std::thread::Builder::new()
+        .name("snapshotter".into())
+        .spawn(move || {
+            if interval.is_zero() {
+                return; // shutdown-only snapshots
+            }
+            loop {
+                std::thread::sleep(interval);
+                match write_snapshot_file(&store, &path) {
+                    Ok(()) => {
+                        let t = store.totals();
+                        log::info!(
+                            "snapshot: wrote {} ({} torrents, {} peers)",
+                            path.display(),
+                            t.0,
+                            t.1
+                        );
+                    }
+                    Err(e) => log::warn!("snapshot: write failed: {e:#}"),
+                }
+            }
+        })
+        .expect("spawn snapshotter");
+}
+
+/// SIGINT/SIGTERM -> best-effort final snapshot, then exit.
+fn spawn_shutdown_handler(config: &Config, store: &Arc<Store>) {
+    let path = config.snapshot.path.clone();
+    let enabled = config.snapshot.enable;
+    let store = store.clone();
+    signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM])
+        .map(|mut sigs| {
+            std::thread::spawn(move || {
+                for sig in sigs.forever() {
+                    log::info!("received signal {sig}, shutting down");
+                    if enabled {
+                        match write_snapshot_file(&store, &path) {
+                            Ok(()) => log::info!("snapshot: final dump written to {}", path.display()),
+                            Err(e) => log::warn!("snapshot: final dump failed: {e:#}"),
+                        }
+                    }
+                    std::process::exit(0);
+                }
+            })
+        })
+        .ok();
 }

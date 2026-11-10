@@ -177,7 +177,7 @@ fn handle_conn(
 fn route(
     req: &Request,
     peer: SocketAddr,
-    _config: &Config,
+    config: &Config,
     store: &Arc<Store>,
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
@@ -190,7 +190,7 @@ fn route(
     let head_only = req.method == "HEAD";
     let resp = match req.path {
         "/announce" => announce_http(req.query, peer.ip(), store, stats, access_list, rng, scratch),
-        "/scrape" => scrape_http(req.query, store),
+        "/scrape" => scrape_http(req.query, store, config.http.full_scrape),
         "/api/stats" => (
             200,
             "application/json",
@@ -459,10 +459,10 @@ fn build_peer_list(
 
 // ---------------- BEP 12 scrape ----------------
 
-fn scrape_http(query: &str, store: &Arc<Store>) -> Response {
+fn scrape_http(query: &str, store: &Arc<Store>, full_scrape: bool) -> Response {
     let params: QueryParams = parse_query(query).into();
-    let mut hashes: Vec<InfoHash> = Vec::new();
     // collect all info_hash params (repeated key)
+    let mut hashes: Vec<InfoHash> = Vec::new();
     for (k, v) in params.0.iter() {
         if k == b"info_hash" {
             if let Some(h) = as_20(v) {
@@ -470,21 +470,33 @@ fn scrape_http(query: &str, store: &Arc<Store>) -> Response {
             }
         }
     }
+    // (info_hash, complete/seeders, incomplete/leechers) rows to encode
+    let mut rows: Vec<(InfoHash, i64, i64)> = Vec::new();
     if hashes.is_empty() {
-        return (400, "text/plain", b"missing info_hash".to_vec());
+        if !full_scrape {
+            return (400, "text/plain", b"missing info_hash".to_vec());
+        }
+        // BEP-12 "full scrape": every tracked torrent.
+        for (h, s, l) in store.all_scrape() {
+            rows.push((h, s as i64, l as i64));
+        }
+    } else {
+        let stats = store.scrape(&hashes);
+        for (h, &(s, _c, l)) in hashes.iter().zip(stats.iter()) {
+            rows.push((*h, s as i64, l as i64));
+        }
     }
-    let stats = store.scrape(&hashes);
     let mut enc = Encoder::new();
     enc.dict_begin();
     enc.dict_raw(b"files", &{
         let mut f = Encoder::new();
         f.dict_begin();
-        for (h, &(s, _c, l)) in hashes.iter().zip(stats.iter()) {
+        for (h, s, l) in &rows {
             let mut d = Encoder::new();
             d.dict_begin();
-            d.dict_int(b"complete", s as i64);
+            d.dict_int(b"complete", *s);
             d.dict_int(b"downloaded", 0);
-            d.dict_int(b"incomplete", l as i64);
+            d.dict_int(b"incomplete", *l);
             d.dict_end();
             f.dict_raw(h, &d.into_vec());
         }

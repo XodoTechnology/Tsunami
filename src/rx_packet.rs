@@ -24,6 +24,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::access::AccessList;
 use crate::config::Config;
 use crate::protocol::{self, ParseFailure, ParseResult, ParsedRequest};
+use crate::ratelimit::RateLimiter;
 use crate::stats::Stats;
 use crate::swarm::{self, InfoHash, PeerEndpoint, Rng, Store};
 use crate::udp::validator::Validator;
@@ -440,6 +441,11 @@ fn worker_main(
     }
 
     let mut rng = Rng::new();
+    let mut rl = RateLimiter::new(
+        config.ratelimit.announce_per_sec,
+        config.ratelimit.scrape_per_sec,
+        config.ratelimit.burst,
+    );
     let mut scratch: Vec<PeerEndpoint> = Vec::with_capacity(256);
     let mut scrape_scratch: Vec<(i32, i32, i32)> = Vec::with_capacity(128);
     let mut out = [0u8; 2048];
@@ -515,6 +521,7 @@ fn worker_main(
                             &mut rng,
                             &mut scratch,
                             &mut scrape_scratch,
+                            &mut rl,
                             &config,
                         );
                     }
@@ -601,6 +608,7 @@ pub fn process_packet(
     rng: &mut Rng,
     peer_scratch: &mut Vec<PeerEndpoint>,
     scrape_scratch: &mut Vec<(i32, i32, i32)>,
+    rl: &mut RateLimiter,
     config: &Config,
 ) {
     let ip = src.ip();
@@ -626,6 +634,10 @@ pub fn process_packet(
                 local.errors.fetch_add(1, Ordering::Relaxed);
                 protocol::write_error_response(out, req.transaction_id, "info hash not allowed")
             } else {
+                if !rl.allow_announce() {
+                    local.rate_limited.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
                 local.announces.fetch_add(1, Ordering::Relaxed);
                 if config.protocol.client_stats {
                     stats.client_stats.record(&req.peer_id);
@@ -663,6 +675,10 @@ pub fn process_packet(
         }
         ParseResult::Ok(ParsedRequest::Scrape { connection_id, transaction_id, hashes }) => {
             if !validator.valid(ip, connection_id) {
+                return;
+            }
+            if !rl.allow_scrape() {
+                local.rate_limited.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             local.scrapes.fetch_add(1, Ordering::Relaxed);

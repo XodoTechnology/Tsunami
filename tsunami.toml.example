@@ -49,6 +49,10 @@ bind = "0.0.0.0:8080"
 # HTTP worker threads (SO_REUSEPORT listeners)
 threads = 4
 max_request_bytes = 16384
+# Allow `GET /scrape` with NO info_hash params to return stats for ALL
+# tracked torrents (BEP-12 "full scrape", same format opentracker uses).
+# HTTP only — UDP scrape is per-hash-list by design (see DEPLOYMENT.md).
+full_scrape = false
 
 [cleaning]
 # Seconds between peer-expiry passes
@@ -73,6 +77,25 @@ enable = false
 # Write scrape export every N cleaning cycles (0 = every cycle)
 every_cycles = 0
 path = "scrape.txt"
+
+[snapshot]
+# Periodically dump peer state to disk and restore it on startup, so a
+# restart doesn't mean ~30 min of clients re-announcing. Peers whose
+# valid_until passed while down are skipped on load. peer_id side-table
+# is NOT restored (repopulates on next announce).
+enable = false
+path = "tsunami.snap"
+# Seconds between dumps; 0 = only on SIGINT/SIGTERM shutdown.
+interval_secs = 300
+
+[ratelimit]
+# DoS shedding via per-worker token buckets on the expensive store paths.
+# Rate is PER SOCKET WORKER; effective global ceiling ≈ value × socket_workers.
+# 0 = unlimited. Connects and parse errors are never limited (cheap handshake).
+announce_per_sec = 0
+scrape_per_sec = 0
+# Token-bucket burst as a multiple of the per-second rate (1.0 = 1s burst).
+burst = 1.0
 
 [logging]
 # error|warn|info|debug|trace

@@ -4,6 +4,7 @@ pub mod config;
 pub mod http;
 pub mod peerid;
 pub mod protocol;
+pub mod ratelimit;
 pub mod stats;
 pub mod rx_packet;
 pub mod swarm;

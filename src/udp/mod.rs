@@ -48,6 +48,7 @@ struct LocalStats {
     bytes_rx: u64,
     bytes_tx: u64,
     dropped: u64,
+    rate_limited: u64,
     peers_added: u64,
     peers_removed: u64,
 }
@@ -62,6 +63,8 @@ impl LocalStats {
         g.bytes_rx.fetch_add(self.bytes_rx, Ordering::Relaxed);
         g.bytes_tx.fetch_add(self.bytes_tx, Ordering::Relaxed);
         g.dropped.fetch_add(self.dropped, Ordering::Relaxed);
+        g.rate_limited
+            .fetch_add(self.rate_limited, Ordering::Relaxed);
         stats
             .peers_added
             .fetch_add(self.peers_added, Ordering::Relaxed);
@@ -194,6 +197,7 @@ pub struct Worker {
     scrape_scratch: Vec<(i32, i32, i32)>,
     local_v4: LocalStats,
     local_v6: LocalStats,
+    rl: crate::ratelimit::RateLimiter,
     _sockets: Vec<socket2::Socket>,
 }
 
@@ -346,6 +350,10 @@ impl Worker {
                     });
                     return;
                 }
+                if !self.rl.allow_announce() {
+                    self.local_mut(is_v4_sock).rate_limited += 1;
+                    return;
+                }
                 self.local_mut(is_v4_sock).announces += 1;
                 if self.config.protocol.client_stats {
                     self.stats.client_stats.record(&req.peer_id);
@@ -412,6 +420,10 @@ impl Worker {
                 hashes,
             }) => {
                 if !self.validator.valid(ip, connection_id) {
+                    return;
+                }
+                if !self.rl.allow_scrape() {
+                    self.local_mut(is_v4_sock).rate_limited += 1;
                     return;
                 }
                 self.local_mut(is_v4_sock).scrapes += 1;
@@ -609,6 +621,12 @@ fn worker_main(
             .user_data(USER_DATA_RECV_V6)
     });
 
+    let rl = crate::ratelimit::RateLimiter::new(
+        config.ratelimit.announce_per_sec,
+        config.ratelimit.scrape_per_sec,
+        config.ratelimit.burst,
+    );
+
     let mut worker = Worker {
         config,
         store,
@@ -631,6 +649,7 @@ fn worker_main(
         scrape_scratch: Vec::with_capacity(128),
         local_v4: LocalStats::default(),
         local_v6: LocalStats::default(),
+        rl,
         _sockets: sock_v4
             .into_iter()
             .chain(sock_v6.into_iter())

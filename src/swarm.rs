@@ -512,6 +512,56 @@ impl<S: Slot> Swarm<S> {
     pub fn peer_id_of(&self, key: &S::Key) -> Option<PeerId> {
         self.peer_ids.as_ref()?.get(key).copied()
     }
+
+    /// Append every peer as a snapshot record. Caller holds the swarm read
+    /// lock, so the copy is consistent. Buffer is cleared first.
+    pub fn peers_snapshot(&self, out: &mut Vec<PeerSnap>) {
+        out.clear();
+        out.reserve(self.peers.len());
+        for p in &self.peers {
+            let e = p.endpoint();
+            out.push(PeerSnap {
+                ip: e.ip,
+                port: e.port,
+                seeder: p.is_seeder(),
+                valid_until: p.valid_until(),
+            });
+        }
+    }
+
+    /// Restore one peer from a snapshot. Returns false on IP-family
+    /// mismatch or if the (ip,port) is already present.
+    pub fn restore_peer(
+        &mut self,
+        ip: &IpAddr,
+        port: u16,
+        seeder: bool,
+        valid_until: u32,
+    ) -> bool {
+        let Some(key) = S::key_for(ip, port) else {
+            return false;
+        };
+        if self.index.contains_key(&key) {
+            return false;
+        }
+        let slot = self.peers.len();
+        self.peers
+            .push(S::new_slot(ip, port, seeder, valid_until));
+        self.index.insert(key, slot as u32);
+        if seeder {
+            self.seeders += 1;
+        }
+        true
+    }
+}
+
+/// One peer record in a snapshot file.
+#[derive(Clone, Copy)]
+pub struct PeerSnap {
+    pub ip: IpAddr,
+    pub port: u16,
+    pub seeder: bool,
+    pub valid_until: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +823,105 @@ impl<S: Slot> FamilyStore<S> {
         swarm.sample_for_api(max_peers, &mut out);
         Some((s, l, out))
     }
+
+    /// Write every torrent + its peers for this family to `w`, each record
+    /// prefixed with `tag` (SNAP_V4 / SNAP_V6). Peers are copied out under a
+    /// brief read lock, then written without holding the swarm lock, so
+    /// announces on that torrent are not blocked by file I/O.
+    pub fn write_snapshot<W: std::io::Write>(
+        &self,
+        w: &mut W,
+        tag: u8,
+    ) -> std::io::Result<()> {
+        let mut recs: Vec<PeerSnap> = Vec::new();
+        for shard in &self.shards {
+            let r = shard.read();
+            for (hash, lock) in r.iter() {
+                // Copy peers under the swarm read lock, release it, then write.
+                let mut buf = std::mem::take(&mut recs);
+                {
+                    let swarm = lock.read();
+                    swarm.peers_snapshot(&mut buf);
+                }
+                w.write_all(&[tag])?;
+                w.write_all(hash)?;
+                w.write_all(&(buf.len() as u32).to_le_bytes())?;
+                for p in &buf {
+                    match p.ip {
+                        IpAddr::V4(v4) => w.write_all(&v4.octets())?,
+                        IpAddr::V6(v6) => w.write_all(&v6.octets())?,
+                    }
+                    w.write_all(&p.port.to_le_bytes())?;
+                    w.write_all(&[p.seeder as u8])?;
+                    w.write_all(&p.valid_until.to_le_bytes())?;
+                }
+                recs = buf;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read one torrent record (tag already consumed) and restore its peers.
+    /// `now` is used to skip peers that already expired while we were down.
+    /// `ip_len` is 4 for the IPv4 store, 16 for IPv6.
+    /// Returns (torrents_touched, peers_added).
+    pub fn read_snapshot_torrent<R: std::io::Read>(
+        &self,
+        r: &mut R,
+        now: u32,
+        ip_len: usize,
+    ) -> std::io::Result<(u64, u64)> {
+        let mut hash = [0u8; 20];
+        r.read_exact(&mut hash)?;
+        let mut cb = [0u8; 4];
+        r.read_exact(&mut cb)?;
+        let count = u32::from_le_bytes(cb) as usize;
+        // Restore into the correct shard; create the swarm if absent.
+        let shard = &self.shards[self.shard_index(&hash)];
+        let mut w = shard.write();
+        let lock = match w.entry(hash) {
+            hashbrown::hash_map::Entry::Occupied(e) => e.into_mut(),
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                self.torrents_live.fetch_add(1, Ordering::Relaxed);
+                self.torrents_created.fetch_add(1, Ordering::Relaxed);
+                e.insert(RwLock::new(Swarm::new(self.store_peer_id)))
+            }
+        };
+        let mut swarm = lock.write();
+        let mut peers_added = 0u64;
+        let mut ipbuf = [0u8; 16];
+        for _ in 0..count {
+            r.read_exact(&mut ipbuf[..ip_len])?;
+            let ip = if ip_len == 4 {
+                IpAddr::V4(Ipv4Addr::new(ipbuf[0], ipbuf[1], ipbuf[2], ipbuf[3]))
+            } else {
+                let mut o = [0u8; 16];
+                o.copy_from_slice(&ipbuf[..16]);
+                IpAddr::V6(Ipv6Addr::from(o))
+            };
+            let mut pb = [0u8; 2];
+            r.read_exact(&mut pb)?;
+            let port = u16::from_le_bytes(pb);
+            let mut fb = [0u8; 1];
+            r.read_exact(&mut fb)?;
+            let seeder = fb[0] != 0;
+            let mut vb = [0u8; 4];
+            r.read_exact(&mut vb)?;
+            let valid_until = u32::from_le_bytes(vb);
+            if valid_until <= now {
+                continue; // expired during downtime
+            }
+            if swarm.restore_peer(&ip, port, seeder, valid_until) {
+                peers_added += 1;
+            }
+        }
+        if peers_added > 0 {
+            self.peers_added.fetch_add(peers_added, Ordering::Relaxed);
+        }
+        // If the swarm ended up empty (all peers expired), leave it; the
+        // next clean pass will reclaim it.
+        Ok((1, peers_added))
+    }
 }
 
 // Helper on Swarm for the API path (sample without exclude, cap at len).
@@ -938,5 +1087,178 @@ impl Store {
             (Some(d), None) | (None, Some(d)) => Some(d),
             (None, None) => None,
         }
+    }
+
+    // ---------------- snapshot / restore ----------------
+
+    /// Snapshot file magic + format version.
+    pub const SNAP_MAGIC: &[u8; 8] = b"TSNAPI01";
+    pub const SNAP_V4: u8 = 1;
+    pub const SNAP_V6: u8 = 2;
+    pub const SNAP_END: u8 = 0;
+
+    /// Write the full peer-state snapshot to `w` (already open for writing).
+    /// Format: magic[8] | version u32 | created u64 | then tagged records
+    /// (SNAP_V4/SNAP_V6 torrent records) terminated by SNAP_END.
+    pub fn write_snapshot<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let created = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        w.write_all(Self::SNAP_MAGIC)?;
+        w.write_all(&1u32.to_le_bytes())?; // version
+        w.write_all(&created.to_le_bytes())?;
+        self.v4.write_snapshot(w, Self::SNAP_V4)?;
+        self.v6.write_snapshot(w, Self::SNAP_V6)?;
+        w.write_all(&[Self::SNAP_END])?;
+        w.flush()?;
+        Ok(())
+    }
+
+    /// Load a snapshot previously written by `write_snapshot`. Peers whose
+    /// valid_until already passed are skipped. Returns (torrents, peers).
+    pub fn load_snapshot<R: std::io::Read>(&self, r: &mut R) -> std::io::Result<(u64, u64)> {
+        let mut magic = [0u8; 8];
+        r.read_exact(&mut magic)?;
+        if &magic != Self::SNAP_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad snapshot magic",
+            ));
+        }
+        let mut vb = [0u8; 4];
+        r.read_exact(&mut vb)?;
+        let version = u32::from_le_bytes(vb);
+        if version != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported snapshot version {version}"),
+            ));
+        }
+        let mut cb = [0u8; 8];
+        r.read_exact(&mut cb)?; // created timestamp (informational)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        let mut torrents = 0u64;
+        let mut peers = 0u64;
+        loop {
+            let mut tag = [0u8; 1];
+            r.read_exact(&mut tag)?;
+            match tag[0] {
+                Self::SNAP_END => break,
+                Self::SNAP_V4 => {
+                    let (t, p) = self.v4.read_snapshot_torrent(r, now, 4)?;
+                    torrents += t;
+                    peers += p;
+                }
+                Self::SNAP_V6 => {
+                    let (t, p) = self.v6.read_snapshot_torrent(r, now, 16)?;
+                    torrents += t;
+                    peers += p;
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("bad snapshot tag {other}"),
+                    ))
+                }
+            }
+        }
+        Ok((torrents, peers))
+    }
+
+    /// All torrents' (info_hash, seeders, leechers) across both families —
+    /// used by the HTTP full-scrape endpoint.
+    pub fn all_scrape(&self) -> Vec<(InfoHash, u32, u32)> {
+        let mut out = Vec::new();
+        self.v4.for_each_torrent(|h, s, l| out.push((*h, s, l)));
+        self.v6.for_each_torrent(|h, s, l| out.push((*h, s, l)));
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_roundtrip() {
+        let store = Store::new(16, false, 900, 1800, 50);
+        let mut rng = Rng::new();
+        let mut out = Vec::new();
+        let hash: InfoHash = [7u8; 20];
+        // `now` far in the future so restored peers aren't seen as expired.
+        let now = 4_000_000_000u32;
+        for i in 0..10u16 {
+            store.announce(
+                &hash,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8 + 1)),
+                5000 + i,
+                [1u8; 20],
+                100,
+                AnnounceEvent::Started,
+                50,
+                now,
+                &mut rng,
+                &mut out,
+            );
+        }
+        // one seeder (left == 0)
+        store.announce(
+            &hash,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 200)),
+            6000,
+            [2u8; 20],
+            0,
+            AnnounceEvent::Started,
+            50,
+            now,
+            &mut rng,
+            &mut out,
+        );
+        let before = store.totals();
+        assert_eq!(before.1, 11);
+
+        let mut buf = Vec::new();
+        store.write_snapshot(&mut buf).unwrap();
+
+        let store2 = Store::new(16, false, 900, 1800, 50);
+        let mut cur = std::io::Cursor::new(&buf);
+        let (t, p) = store2.load_snapshot(&mut cur).unwrap();
+        let after = store2.totals();
+        assert_eq!(t, 1);
+        assert_eq!(p, 11);
+        assert_eq!(after, before);
+        // scrape parity between original and restored store
+        assert_eq!(store.scrape(&[hash]), store2.scrape(&[hash]));
+    }
+
+    #[test]
+    fn snapshot_skips_expired() {
+        let store = Store::new(8, false, 900, 1800, 50);
+        let mut rng = Rng::new();
+        let mut out = Vec::new();
+        let hash: InfoHash = [9u8; 20];
+        // announce with valid_until already in the past relative to load-time `now`
+        store.announce(
+            &hash,
+            IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1)),
+            4000,
+            [3u8; 20],
+            100,
+            AnnounceEvent::Started,
+            50,
+            1000, // now=1000 -> valid_until=2800 (long past)
+            &mut rng,
+            &mut out,
+        );
+        let mut buf = Vec::new();
+        store.write_snapshot(&mut buf).unwrap();
+        let store2 = Store::new(8, false, 900, 1800, 50);
+        let mut cur = std::io::Cursor::new(&buf);
+        let (_t, p) = store2.load_snapshot(&mut cur).unwrap();
+        assert_eq!(p, 0); // expired peer skipped
     }
 }

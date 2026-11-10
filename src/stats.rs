@@ -15,7 +15,8 @@ pub struct ProtoStats {
     pub errors: AtomicU64,
     pub bytes_rx: AtomicU64,
     pub bytes_tx: AtomicU64,
-    pub dropped: AtomicU64, // responses dropped (no send buffer)
+    pub dropped: AtomicU64,   // responses dropped (no send buffer)
+    pub rate_limited: AtomicU64, // requests shed by the rate limiter
 }
 
 impl ProtoStats {
@@ -37,6 +38,8 @@ impl ProtoStats {
             .fetch_add(other.bytes_tx.load(Ordering::Relaxed), Ordering::Relaxed);
         self.dropped
             .fetch_add(other.dropped.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.rate_limited
+            .fetch_add(other.rate_limited.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 }
 
@@ -269,6 +272,7 @@ fn proto_json(p: &ProtoStats) -> serde_json::Value {
         "bytes_rx": p.bytes_rx.load(Ordering::Relaxed),
         "bytes_tx": p.bytes_tx.load(Ordering::Relaxed),
         "dropped": p.dropped.load(Ordering::Relaxed),
+        "rate_limited": p.rate_limited.load(Ordering::Relaxed),
     })
 }
 
@@ -292,6 +296,7 @@ fn proto_prom(s: &mut String, proto: &str, ipver: &str, p: &ProtoStats) {
     m!("scrapes_total", "Scrape requests", p.scrapes.load(Ordering::Relaxed), "counter");
     m!("errors_total", "Errors", p.errors.load(Ordering::Relaxed), "counter");
     m!("dropped_total", "Dropped responses", p.dropped.load(Ordering::Relaxed), "counter");
+    m!("rate_limited_total", "Requests shed by rate limiter", p.rate_limited.load(Ordering::Relaxed), "counter");
     m!("bytes_rx_total", "Bytes received", p.bytes_rx.load(Ordering::Relaxed), "counter");
     m!("bytes_tx_total", "Bytes sent", p.bytes_tx.load(Ordering::Relaxed), "counter");
 }

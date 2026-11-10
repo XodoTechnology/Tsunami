@@ -24,6 +24,15 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
   and browser-based peers.
 - **Unified store**: UDP, HTTP, and WebSocket peers share one swarm store,
   so stats are consistent across protocols.
+- **Peer-state snapshot/restore**: periodic + on-shutdown dump of the full
+  swarm to disk; restored on startup so restarts don't cause a re-announce
+  storm. See `[snapshot]`.
+- **Rate limiting / DoS shedding**: per-worker token buckets shed announce
+  and scrape load under flood while keeps the cheap connect/parse path
+  open. See `[ratelimit]`.
+- **Full scrape**: `GET /scrape` with no `info_hash` returns stats for every
+  tracked torrent (BEP-12 format, same as opentracker's fullscrape). Enable
+  with `http.full_scrape`. HTTP only — UDP scrape is per-hash-list by design.
 - **Stats API** (JSON):
   - `GET /api/stats` — totals, per-protocol counters, rates, top clients
   - `GET /api/torrents?limit=&offset=` — torrent list sorted by swarm size
@@ -85,7 +94,7 @@ Sockets spread across `127/8` loopback aliases for many distinct peers.
 |------|----------|-------|
 | `udp://host:port` | BEP 15 | announce/scrape/connect |
 | `/announce` | BEP 3 | GET, bencoded dict |
-| `/scrape` | BEP 12 | GET, repeated `info_hash` params |
+| `/scrape` | BEP 12 | GET, repeated `info_hash` params; no params = full scrape (if enabled) |
 | `/api/stats` | JSON | website stats snapshot |
 | `/api/torrents` | JSON | `?limit=100&offset=0` |
 | `/api/torrent/{hex}` | JSON | `?limit=200` peers |

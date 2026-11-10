@@ -14,6 +14,8 @@ pub struct Config {
     pub statistics: StatisticsConfig,
     pub access_list: AccessListConfig,
     pub scrape_export: ScrapeExportConfig,
+    pub snapshot: SnapshotConfig,
+    pub ratelimit: RateLimitConfig,
     pub logging: LoggingConfig,
 }
 
@@ -69,6 +71,9 @@ pub struct HttpConfig {
     pub threads: usize,
     /// Max request body / header bytes.
     pub max_request_bytes: usize,
+    /// Allow `GET /scrape` with no info_hash params to return stats for
+    /// ALL tracked torrents (BEP-12 "full scrape"). HTTP only — see docs.
+    pub full_scrape: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +118,30 @@ pub struct ScrapeExportConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub struct SnapshotConfig {
+    /// Periodically dump peer state and restore it on startup.
+    pub enable: bool,
+    /// Snapshot file path.
+    pub path: PathBuf,
+    /// Seconds between periodic snapshots (0 = only on shutdown).
+    pub interval_secs: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Max announce requests/sec PER SOCKET WORKER (0 = unlimited).
+    /// Effective global ceiling ≈ value × socket_workers.
+    pub announce_per_sec: u64,
+    /// Max scrape requests/sec PER SOCKET WORKER (0 = unlimited).
+    pub scrape_per_sec: u64,
+    /// Token-bucket burst allowance as a multiple of the per-second rate
+    /// (1.0 = one second of burst, 2.0 = two seconds). Min 1.0.
+    pub burst: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     /// log crate level filter: error|warn|info|debug|trace
     pub level: String,
@@ -128,6 +157,8 @@ impl Default for Config {
             statistics: StatisticsConfig::default(),
             access_list: AccessListConfig::default(),
             scrape_export: ScrapeExportConfig::default(),
+            snapshot: SnapshotConfig::default(),
+            ratelimit: RateLimitConfig::default(),
             logging: LoggingConfig::default(),
         }
     }
@@ -171,6 +202,7 @@ impl Default for HttpConfig {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080),
             threads: 4,
             max_request_bytes: 256 * 1024,
+            full_scrape: false,
         }
     }
 }
@@ -209,6 +241,26 @@ impl Default for ScrapeExportConfig {
             enable: false,
             every_cycles: 10,
             path: PathBuf::from("scrape_export.txt"),
+        }
+    }
+}
+
+impl Default for SnapshotConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            path: PathBuf::from("tsunami.snap"),
+            interval_secs: 300,
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            announce_per_sec: 0,
+            scrape_per_sec: 0,
+            burst: 1.0,
         }
     }
 }
