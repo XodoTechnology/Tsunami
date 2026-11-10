@@ -1,0 +1,79 @@
+# Tsunami configuration
+
+[network]
+use_ipv4 = true
+use_ipv6 = true
+# UDP tracker bind addresses (one socket set per family, SO_REUSEPORT)
+bind_ipv4 = "0.0.0.0:6881"
+bind_ipv6 = "[::]:6881"
+# Kernel socket receive buffer per UDP socket (0 = OS default ~200KB).
+# For high pps set 16-64MiB. Linux doubles the value you set.
+socket_recv_buffer = 16777216
+# io_uring entries per worker = RX provided buffers (2KiB each) + TX pool
+# (~4KiB each). 4096 -> ~8MiB RX + ~17MiB TX per worker.
+ring_size = 4096
+# Worker threads; 0 = number of online CPUs. One io_uring each.
+socket_workers = 0
+# UDP RX backend:
+#   "io_uring"  - multishot recvmsg on a UDP socket (default, lowest CPU)
+#   "af_packet" - PACKET_RX_RING tap + kernel hash-fanout across workers;
+#                parses L2/L3/L4 in userspace, sends replies via UDP sockets.
+#                Trades ~1.5x CPU for much lower burst loss (kernel ring
+#                absorbs floods that overflow UDP socket buffers).
+#                Needs root/CAP_NET_RAW. Interface auto-detected from the
+#                default route; override with TSUNAMI_PACKET_IFACE.
+rx_backend = "io_uring"
+# Shards per IP family for swarm state (power of two). More = less contention.
+swarm_shards = 256
+
+[protocol]
+# Announce interval reported to peers (seconds)
+peer_announce_interval = 1800
+# Peers not announcing within this window are expired (seconds)
+max_peer_age = 2700
+# Max peers returned per announce
+max_response_peers = 50
+# Max info hashes honored per UDP scrape
+max_scrape_torrents = 100
+# Connection-id validity window (seconds)
+max_connection_age = 300
+# Store peer_id per peer (~+40B/peer). Needed for HTTP compact=0 peer_id
+# echo and per-peer client detail. Disable at very large scale.
+store_peer_id = false
+# Count announces per client (BEP20 prefix) for /api/clients. Cheap.
+client_stats = true
+
+[http]
+enable = true
+bind = "0.0.0.0:8080"
+# HTTP worker threads (SO_REUSEPORT listeners)
+threads = 4
+max_request_bytes = 16384
+
+[cleaning]
+# Seconds between peer-expiry passes
+interval = 30
+# Cleaner threads (strided shard subsets)
+threads = 2
+
+[statistics]
+# Log a stats line + refresh rates this often (seconds); 0 = disabled
+log_interval = 10
+# Write full JSON snapshot here every log_interval ("" = disabled)
+write_json_to = ""
+
+[access_list]
+# "off" | "allow" | "deny" — info hashes, one hex per line
+mode = "off"
+file = "access.txt"
+reload_on_sighup = true
+
+[scrape_export]
+enable = false
+# Write scrape export every N cleaning cycles (0 = every cycle)
+every_cycles = 0
+path = "scrape.txt"
+
+[logging]
+# error|warn|info|debug|trace
+level = "info"

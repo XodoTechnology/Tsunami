@@ -1,0 +1,51 @@
+[package]
+name = "tsunami"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "High-performance BitTorrent tracker (UDP + HTTP)"
+
+[lib]
+name = "tsunami"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tsunami"
+path = "src/main.rs"
+
+[[bin]]
+name = "tsunami-loadgen"
+path = "src/bin/loadgen.rs"
+
+[dependencies]
+io-uring = "0.7"
+socket2 = { version = "0.6", features = ["all"] }
+hashbrown = { version = "0.15", features = ["default-hasher"] }
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+getrandom = "0.3"
+blake3 = "1"
+constant_time_eq = "0.3"
+libc = "0.2"
+mimalloc = { version = "0.1", default-features = false }
+signal-hook = "0.3"
+arc-swap = "1"
+rand = "0.9"
+sha1 = "0.10"
+
+[profile.release]
+debug = false
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+panic = "abort"
+
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
