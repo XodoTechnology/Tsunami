@@ -529,6 +529,16 @@ impl<S: Slot> Swarm<S> {
         }
     }
 
+    /// Pre-size storage before a bulk restore so the per-peer inserts don't
+    /// trigger repeated HashMap rehashes / Vec reallocs.
+    pub fn reserve_restore(&mut self, additional: usize) {
+        self.peers.reserve(additional);
+        self.index.reserve(additional);
+        if let Some(m) = self.peer_ids.as_mut() {
+            m.reserve(additional);
+        }
+    }
+
     /// Restore one peer from a snapshot. Returns false on IP-family
     /// mismatch or if the (ip,port) is already present.
     pub fn restore_peer(
@@ -888,6 +898,8 @@ impl<S: Slot> FamilyStore<S> {
             }
         };
         let mut swarm = lock.write();
+        // Pre-size for the incoming peer_count so inserts don't rehash.
+        swarm.reserve_restore(count);
         let mut peers_added = 0u64;
         let mut ipbuf = [0u8; 16];
         for _ in 0..count {

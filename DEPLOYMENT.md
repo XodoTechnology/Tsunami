@@ -112,6 +112,34 @@ handshake and dropping them just causes client retries anyway.
   `store_peer_id=true`); it repopulates on each peer's next announce.
 - Expired peers (`valid_until` passed during downtime) are skipped on load.
 
+### Snapshot in RAM (tmpfs) — faster restarts
+
+Important nuance: a snapshot buffer *inside the tracker process* cannot
+survive a restart — process RAM is freed on exit. But you can put the
+snapshot **file** on a RAM-backed filesystem so reads/writes run at memory
+speed while still surviving process restarts:
+
+```toml
+[snapshot]
+path = "/dev/shm/tsunami.snap"   # tmpfs = RAM-backed, survives restarts
+```
+
+`/dev/shm` (tmpfs) is RAM-backed and persists across process restarts —
+it only disappears on machine reboot or explicit deletion. Measured on this
+box: ~55K peers restored to "ready" in ~110 ms. Size tmpfs for the file
+(~12 B/peer v4 → ~600 MB at 50M peers). For a snapshot that must also
+survive a *machine* reboot, keep `path` on real disk — or write to both.
+
+The restore cost is dominated by **index rebuild** (hash-inserting every
+peer), not file I/O — `read_snapshot_torrent` pre-sizes each swarm's
+HashMap/Vec from the recorded peer count to avoid rehash storms. Expect
+roughly ~0.5–1M peers/sec restore ⇒ ~50–100 s for a full 50M-peer state.
+
+For **zero-downtime** restarts (no gap at all), the real answer is running
+two tracker instances behind a load balancer with peer-state sync
+(livesync/cluster) — planned as future work; snapshots cover the
+stop-start case.
+
 ## Full scrape (`http.full_scrape`)
 
 `GET /scrape` with **no** `info_hash` params returns stats for **every**
