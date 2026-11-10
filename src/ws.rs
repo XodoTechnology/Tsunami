@@ -250,8 +250,9 @@ fn unix_now() -> u32 {
 }
 
 /// Dispatch one BEP-15 binary message; returns the binary response payload.
+/// Shared by the WebSocket session and the HTTP `/bep15` endpoint.
 #[allow(clippy::too_many_arguments)]
-fn dispatch(
+pub(crate) fn dispatch(
     payload: &[u8],
     ip: IpAddr,
     peer: SocketAddr,

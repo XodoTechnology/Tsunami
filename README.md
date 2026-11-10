@@ -22,6 +22,13 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
 - **WebSocket tracker** (`ws://host:port/announce`, `/scrape`, `/connect`)
   — BEP-15 binary messages inside WebSocket binary frames, for WebTorrent
   and browser-based peers.
+- **Raw BEP-15 over HTTP** (`POST /bep15`, alias `/udp`) — send the exact
+  binary request a UDP client would send in the POST body and get the same
+  binary BEP-15 reply back (`application/octet-stream`). Supports connect /
+  announce / scrape, validates connection ids against your source IP, and
+  returns `204 No Content` for protocol-level drops (same as a UDP client
+  seeing no reply). Lets UDP-protocol tooling run over HTTP(S) or through
+  proxies that can't do UDP.
 - **Unified store**: UDP, HTTP, and WebSocket peers share one swarm store,
   so stats are consistent across protocols.
 - **Peer-state snapshot/restore**: periodic + on-shutdown dump of the full
@@ -100,6 +107,7 @@ Sockets spread across `127/8` loopback aliases for many distinct peers.
 | `/api/torrent/{hex}` | JSON | `?limit=200` peers |
 | `/api/clients` | JSON | `?n=50` top clients |
 | `/metrics` | Prometheus | text exposition format |
+| `/bep15`, `/udp` | Raw BEP-15 | POST binary request → binary response |
 | `ws://host:port/announce` | WebSocket | BEP-15 in WS binary frames |
 | `ws://host:port/scrape` | WebSocket | same |
 | `ws://host:port/connect` | WebSocket | same |

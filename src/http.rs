@@ -29,17 +29,23 @@ pub fn run_http(
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<()>>> {
     let threads = config.http.threads.max(1);
     let max_req = config.http.max_request_bytes.max(1024);
+    // One shared validator key across all HTTP threads so BEP-15 connection
+    // ids issued on one thread validate on another (SO_REUSEPORT spreads conns).
+    let validator = Arc::new(crate::udp::validator::Validator::new(
+        config.protocol.max_connection_age,
+    ));
     let mut handles = Vec::new();
     for i in 0..threads {
         let store = store.clone();
         let stats = stats.clone();
         let access_list = access_list.clone();
         let config = config.clone();
+        let validator = validator.clone();
         handles.push(
             std::thread::Builder::new()
                 .name(format!("http-{i:02}"))
                 .spawn(move || {
-                    if let Err(e) = http_thread(config, store, stats, access_list, max_req) {
+                    if let Err(e) = http_thread(config, store, stats, access_list, max_req, validator) {
                         log::error!("http thread {i} died: {e:#}");
                     }
                 })
@@ -64,11 +70,13 @@ fn http_thread(
     stats: Arc<Stats>,
     access_list: Arc<AccessList>,
     max_req: usize,
+    validator: Arc<crate::udp::validator::Validator>,
 ) -> anyhow::Result<()> {
     let listener = create_listener(config.http.bind)?;
     let mut rng = Rng::new();
     let mut scratch: Vec<PeerEndpoint> = Vec::with_capacity(256);
-    let validator = crate::udp::validator::Validator::new(config.protocol.max_connection_age);
+    // Cheap clone sharing the parent key + start instant.
+    let validator = validator.for_worker();
     loop {
         match listener.accept() {
             Ok((stream, _peer)) => {
@@ -162,6 +170,52 @@ fn handle_conn(
         None => return write_response(&mut stream, 400, "text/plain", b"bad request"),
     };
 
+    // Raw BEP-15 over HTTP: POST /bep15 with the same binary payload a UDP
+    // client would send; response is the same binary reply. Lets UDP-protocol
+    // tooling work over HTTP(S).
+    if req.method == "POST" && (req.path == "/bep15" || req.path == "/udp") {
+        let clen = content_length(head).unwrap_or(0);
+        if clen > max_req {
+            return write_response(&mut stream, 413, "text/plain", b"body too large");
+        }
+        let mut body = buf[header_end..].to_vec();
+        while body.len() < clen {
+            let mut chunk = [0u8; 8192];
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Ok(())
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        body.truncate(clen);
+        let mut v = validator.for_worker();
+        let resp = crate::ws::dispatch(
+            &body,
+            peer.ip(),
+            peer,
+            config,
+            store,
+            stats,
+            access_list,
+            &mut v,
+            rng,
+            scratch,
+        );
+        // dispatch() already accounts requests/bytes_rx/bytes_tx + proto counters.
+        return match resp {
+            Some(bytes) => {
+                write_response(&mut stream, 200, "application/octet-stream", &bytes)
+            }
+            None => write_response(&mut stream, 204, "application/octet-stream", b""),
+        };
+    }
+
     let (status, ctype, body) = route(
         &req, peer, config, store, stats, access_list, rng, scratch,
     );
@@ -232,6 +286,19 @@ fn route(
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Extract `Content-Length: N` from raw request headers (case-insensitive).
+fn content_length(head: &[u8]) -> Option<usize> {
+    let text = std::str::from_utf8(head).ok()?;
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                return v.trim().parse().ok();
+            }
+        }
+    }
+    None
 }
 
 fn parse_head(head: &[u8]) -> Option<Request<'_>> {
@@ -599,8 +666,10 @@ fn write_response(
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
+        204 => "No Content",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
         _ => "Error",
     };

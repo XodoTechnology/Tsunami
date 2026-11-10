@@ -153,6 +153,36 @@ your website.
   the HTTP endpoint (or the periodic `scrape_export` file).
 - Cost: iterates all swarms once; fine for periodic pulls, don't hammer it.
 
+## Raw BEP-15 over HTTP (`POST /bep15`, alias `/udp`)
+
+`POST /bep15` accepts the **exact binary request a UDP client would send**
+in the request body (`Content-Type: application/octet-stream`,
+`Content-Length` required) and returns the same binary BEP-15 reply in the
+response body. It supports connect / announce / scrape and reuses the same
+connection-id validation and swarm store as native UDP — so UDP-protocol
+tooling, scrapers, and clients on UDP-blocked networks can talk to the
+tracker over HTTP(S) or through a TCP-only proxy.
+
+Semantics match UDP:
+
+- `200 OK` + `application/octet-stream` body = the BEP-15 response datagram.
+- `204 No Content` = the request was silently dropped (bad/expired
+  connection id, malformed packet) — the HTTP equivalent of a UDP client
+  receiving no reply.
+- `413` if the body exceeds `http.max_request_bytes`; `405` for non-POST.
+
+**Source-IP caveat:** like UDP, the tracker keys connection ids and peer
+identity to the *connection's source IP*. If you terminate TLS or proxy in
+front of `/bep15` (nginx, Cloudflare, a load balancer), every peer will
+appear as the proxy's IP unless the proxy preserves the real client address
+(e.g. PROXY protocol or a trusted `X-Forwarded-For` you terminate yourself).
+For peer-accurate announces, expose `/bep15` directly or ensure the real
+client IP reaches the tracker. (Regular `GET /announce`+`/scrape` over HTTP
+have the same consideration.)
+
+One request per connection; send `Connection: close` or let the client
+re-open — there's no keep-alive pipelining on this endpoint.
+
 ## Tuning checklist
 
 | Knob | VM | Bare metal |
