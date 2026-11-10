@@ -270,15 +270,18 @@ impl Worker {
                 }
             }
         } else {
-            // sendmsg completion: user_data = send buffer index
-            let idx = ud as usize;
+            // sendmsg completion: user_data = buffer index | SEND_V6 flag
+            let is_v6 = ud & send_buffers::SEND_V6 != 0;
+            let idx = (ud & !send_buffers::SEND_V6) as usize;
             let res = cqe.result();
             if res < 0 {
                 log::error!("sendmsg failed: {}", std::io::Error::from_raw_os_error(-res));
             }
             unsafe { self.send_buffers.mark_free(idx) };
             if res > 0 {
-                self.local_v4.bytes_tx += res as u64 + 28;
+                // L3+L4 header overhead: IPv4=20+8, IPv6=40+8.
+                let hdr = if is_v6 { 48u64 } else { 28u64 };
+                self.local_mut(!is_v6).bytes_tx += res as u64 + hdr;
             }
         }
     }

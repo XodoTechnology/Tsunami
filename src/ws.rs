@@ -184,7 +184,12 @@ fn ws_session(
     access_list: &AccessList,
     mut validator: Validator,
 ) -> Result<()> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+    // Idle timeout = connection-id lifetime: a client may legitimately wait a
+    // full announce interval between messages, so don't reap it early. Dead
+    // conns are still reaped within max_connection_age.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(
+        config.protocol.max_connection_age.max(60),
+    )));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_nodelay(true);
     let ip = peer.ip();
@@ -223,10 +228,10 @@ fn ws_session(
                     continue;
                 }
                 cur.extend_from_slice(&payload);
+                if cur.len() > MAX_WS_MESSAGE {
+                    return Err(anyhow!("ws fragmented message too large"));
+                }
                 if !fin {
-                    if cur.len() > MAX_WS_MESSAGE {
-                        return Err(anyhow!("ws fragmented message too large"));
-                    }
                     continue;
                 }
                 in_frag = false;

@@ -612,9 +612,11 @@ pub fn process_packet(
     config: &Config,
 ) {
     let ip = src.ip();
+    // L3+L4 header overhead for byte accounting: IPv4=20+8, IPv6=40+8.
+    let hdr_len = if src.is_ipv4() { 28u64 } else { 48u64 };
     let local = if src.is_ipv4() { &stats.udp_ipv4 } else { &stats.udp_ipv6 };
     local.requests.fetch_add(1, Ordering::Relaxed);
-    local.bytes_rx.fetch_add(payload.len() as u64 + 28, Ordering::Relaxed);
+    local.bytes_rx.fetch_add(payload.len() as u64 + hdr_len, Ordering::Relaxed);
 
     let resp_len = match protocol::parse_request(payload, config.protocol.max_scrape_torrents) {
         ParseResult::Ok(ParsedRequest::Connect { transaction_id }) => {
@@ -706,7 +708,7 @@ pub fn process_packet(
         ParseResult::Err(ParseFailure::Drop) => return,
     };
 
-    local.bytes_tx.fetch_add(resp_len as u64 + 28, Ordering::Relaxed);
+    local.bytes_tx.fetch_add(resp_len as u64 + hdr_len, Ordering::Relaxed);
     if !send(&out[..resp_len], src) {
         local.dropped.fetch_add(1, Ordering::Relaxed);
     }

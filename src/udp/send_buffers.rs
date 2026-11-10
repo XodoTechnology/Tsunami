@@ -14,6 +14,11 @@ pub const RESPONSE_BUF_LEN: usize = 4096;
 const SOCKET_V4: Fixed = Fixed(0);
 const SOCKET_V6: Fixed = Fixed(1);
 
+/// user_data flag bit marking a sendmsg destined for an IPv6 peer, so the
+/// completion handler can attribute bytes_tx to the right family counter.
+/// Buffer indices are < ring_entries (<= 32768), far below this bit.
+pub const SEND_V6: u64 = 1 << 32;
+
 pub struct SendBuffer {
     name_v4: libc::sockaddr_in,
     name_v6: libc::sockaddr_in6,
@@ -152,8 +157,9 @@ impl SendBuffers {
         };
         // Safety: mhdr/iov/bytes live inside a Box that outlives the SQE;
         // buffer is not freed until its CQE arrives.
+        let ud = (idx as u64) | if matches!(addr, SocketAddr::V6(_)) { SEND_V6 } else { 0 };
         SendMsg::new(fd, addr_of_mut!(b.mhdr) as *mut libc::msghdr)
             .build()
-            .user_data(idx as u64)
+            .user_data(ud)
     }
 }
