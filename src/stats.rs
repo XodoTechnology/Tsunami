@@ -89,8 +89,6 @@ pub struct Stats {
     /// Peers added/removed totals (all protocols).
     pub peers_added: AtomicU64,
     pub peers_removed: AtomicU64,
-    /// Torrents created (approx, via announce-created swarms).
-    pub torrents_created: AtomicU64,
     /// Active HTTP connections.
     pub http_connections: AtomicU64,
     pub client_stats: ClientStats,
@@ -115,7 +113,6 @@ impl Stats {
             http: ProtoStats::default(),
             peers_added: AtomicU64::new(0),
             peers_removed: AtomicU64::new(0),
-            torrents_created: AtomicU64::new(0),
             http_connections: AtomicU64::new(0),
             client_stats: ClientStats::new(),
             snapshot: Mutex::new(StatsSnapshot {

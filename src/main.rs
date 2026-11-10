@@ -61,21 +61,36 @@ fn main() -> anyhow::Result<()> {
     }
 
     // UDP workers — io_uring backend (default) or AF_PACKET ring backend
-    let _udp_handles = if config.network.rx_backend == "af_packet" {
-        log::info!("RX backend: af_packet ({} workers)", config.network.socket_workers.max(1));
-        rx_packet::run_packet_workers(
-            config.clone(),
-            store.clone(),
-            stats.clone(),
-            access_list.clone(),
-        )?
+    let n_udp = if config.network.socket_workers == 0 {
+        std::thread::available_parallelism().map(Into::into).unwrap_or(1)
     } else {
-        udp::run_workers(
+        config.network.socket_workers
+    };
+    let _udp_handles = match config.network.rx_backend.as_str() {
+        "af_packet" => {
+            log::info!("RX backend: af_packet ({n_udp} workers)");
+            rx_packet::run_packet_workers(
+                config.clone(),
+                store.clone(),
+                stats.clone(),
+                access_list.clone(),
+            )?
+        }
+        "io_uring" => udp::run_workers(
             config.clone(),
             store.clone(),
             stats.clone(),
             access_list.clone(),
-        )?
+        )?,
+        other => {
+            log::warn!("unknown rx_backend '{other}'; falling back to io_uring");
+            udp::run_workers(
+                config.clone(),
+                store.clone(),
+                stats.clone(),
+                access_list.clone(),
+            )?
+        }
     };
 
     // HTTP plane
@@ -95,8 +110,8 @@ fn main() -> anyhow::Result<()> {
     // Maintenance thread: periodic stats logging + scrape export.
     spawn_maintenance(&config, &store, &stats);
 
-    // SIGHUP -> reload access list
-    {
+    // SIGHUP -> reload access list (only if enabled in config)
+    if config.access_list.reload_on_sighup {
         let access_list = access_list.clone();
         signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP])
             .map(|mut sigs| {
