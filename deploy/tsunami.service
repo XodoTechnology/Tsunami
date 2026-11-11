@@ -1,0 +1,34 @@
+[Unit]
+Description=Tsunami BitTorrent Tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+ExecStart=@PREFIX@/bin/tsunami -c @CONFIG@/tsunami.toml
+# SIGHUP reloads the access list when access_list.reload_on_sighup = true
+ExecReload=/bin/kill -HUP $MAINPID
+WorkingDirectory=@STATE@
+Restart=always
+RestartSec=2
+# Peer state is large and latency-critical: keep it out of the OOM killer's
+# first choices and give it plenty of fds for HTTP/WS + snapshot I/O.
+OOMScoreAdjust=-500
+LimitNOFILE=1048576
+# CAP_NET_RAW is only needed for rx_backend = "af_packet"; granting it
+# always keeps the unit unchanged if you switch backends later.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+# Sensible hardening that doesn't fight the workload:
+ProtectSystem=full
+PrivateTmp=true
+# Uncomment to pin all threads to specific cores (UDP workers + HTTP +
+# cleaners share the process; pick cores away from IRQ-heavy NIC queues):
+# CPUAffinity=2-15
+# NUMA-pinned alternative (bare metal): wrap ExecStart instead, e.g.
+# ExecStart=/usr/bin/numactl --cpunodebind=0 --membind=0 @PREFIX@/bin/tsunami -c @CONFIG@/tsunami.toml
+
+[Install]
+WantedBy=multi-user.target

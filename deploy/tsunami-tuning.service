@@ -1,0 +1,14 @@
+[Unit]
+Description=Tsunami OS tuning (governor/THP/sysctl extras)
+After=multi-user.target
+Before=tsunami.service
+
+[Service]
+Type=oneshot
+# Re-applies /etc/tsunami/tune.conf options at boot. Installed and enabled
+# by `scripts/tune.sh --persist` (or scripts/install.sh --tune-persist).
+ExecStart=@LIBEXECDIR@/tsunami-tune --boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

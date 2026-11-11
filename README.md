@@ -88,6 +88,20 @@ cargo build --release
 # binaries: target/release/tsunami, target/release/tsunami-loadgen
 ```
 
+## Install & OS tuning (Linux)
+
+```sh
+sudo scripts/install.sh --tune --with-loadgen   # build + install + tune
+sudo systemctl enable --now tsunami
+```
+
+Installs the binary, a `tsunami` service user, `/etc/tsunami/tsunami.toml`,
+systemd units, and `/etc/sysctl.d/99-tsunami.conf` (socket buffers, RX
+backlog, NAPI budgets — see `DEPLOYMENT.md`). `scripts/tune.sh` separately
+handles CPU governor / THP / optional hugepages, RPS and busy-poll, with
+`--check`, `--persist` (boot unit) and `--set KEY=V`. See
+`DEPLOYMENT.md` → "One-command install + OS tuning".
+
 ## Run
 
 ```sh

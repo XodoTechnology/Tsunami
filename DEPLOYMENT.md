@@ -17,6 +17,52 @@ below is opt-in.
 | `af_packet` RX backend | any | `CAP_NET_RAW` (root) | any NIC | lower burst loss, ~1.5× CPU |
 | AF_XDP (future) | ≥ 5.4 | `CAP_NET_ADMIN`+`CAP_NET_RAW` | **native-XDP NIC** | not yet shipped |
 
+## One-command install + OS tuning
+
+`scripts/install.sh` does the whole setup — build, service user, systemd
+units, config, sysctl tuning, optional host tuning:
+
+```sh
+sudo scripts/install.sh --tune --with-loadgen     # build + install + tune
+sudo systemctl enable --now tsunami               # start it
+```
+
+Useful flags: `--prefix`, `--config-dir`, `--state-dir`, `--user`,
+`--binary`/`--no-build`, `--no-sysctl`, `--tune-persist` (re-apply host
+tuning at boot), `--af-packet` (file-cap for the AF_PACKET backend),
+`--enable`/`--start`. Config lands at `/etc/tsunami/tsunami.toml`
+(seed from `tsunami.toml.example`, **never overwritten** on reinstall) and
+is group-readable only (`0640 root:tsunami`). The unit runs as the
+`tsunami` user with `AmbientCapabilities=CAP_NET_RAW` (needed only if you
+switch `rx_backend` to `af_packet`), `Restart=always`, `LimitNOFILE=1M`,
+`OOMScoreAdjust=-500`, and `ExecReload` → SIGHUP (access-list reload).
+
+`scripts/tune.sh` handles the host-level knobs the tracker can't set
+itself — run it standalone any time:
+
+```sh
+sudo scripts/tune.sh --check      # show current vs target, change nothing
+sudo scripts/tune.sh              # apply (reads /etc/tsunami/tune.conf)
+sudo scripts/tune.sh --persist    # re-apply at every boot
+sudo scripts/tune.sh --set KEY=V  # record + apply an option
+```
+
+It applies `/etc/sysctl.d/99-tsunami.conf` (installed by install.sh),
+sets the CPU governor to `performance`, and sets Transparent Huge Pages
+to `madvise`. `/etc/tsunami/tune.conf` options:
+
+| Key | Default | Effect |
+|---|---|---|
+| `GOVERNOR` | `performance` | cpufreq governor for all CPUs |
+| `THP` | `madvise` | `always`\|`madvise`\|`never` |
+| `HUGEPAGES` | — | reserve N×2 MiB hugepages (only helps once the app can use them — see below) |
+| `BUSY_POLL` | — | `net.core.busy_poll`/`busy_read` µs — NAPI busy-poll, trades a core for latency |
+| `RPS_IFACE` | — | enable Receive Packet Steering on an iface (single-queue virtio) |
+
+The script never touches NIC channels or IRQ affinity automatically —
+`ethtool -L` resets the link. It prints the recommended commands instead;
+see "Bare-metal deployment" below.
+
 ## Kernel requirements
 
 - **io_uring backend (default):** Linux ≥ 5.1 for `recvmsg` multishot +
@@ -310,6 +356,12 @@ these announces. The two features compose: `proxy_ip_header` gives the
 swarm address on top of it.
 
 ## Tuning checklist
+
+Start with `sudo scripts/install.sh --tune` — it applies the sysctl drop-in
+(`net.core.rmem_max`/`wmem_max` = 256 MiB so `socket_recv_buffer` up to
+128 MiB isn't silently clamped, `netdev_max_backlog` = 250k, raised NAPI
+budgets, `somaxconn`, `swappiness=10`), the `performance` governor and
+THP=`madvise`. The table below is what to adjust *in the config* on top:
 
 | Knob | VM | Bare metal |
 |---|---|---|
