@@ -41,6 +41,9 @@ fn main() -> anyhow::Result<()> {
     log::info!("tsunami v{VERSION} starting");
 
     let stats = Stats::new();
+    stats
+        .client_stats
+        .set_ignore_prefixes(config.protocol.client_stats_ignore.clone());
     let shards = config.network.swarm_shards.max(1).next_power_of_two();
     let store = Arc::new(Store::new(
         shards,

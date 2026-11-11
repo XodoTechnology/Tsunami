@@ -49,6 +49,9 @@ client_stats = true
 # WARNING: lets any client inject arbitrary IPs (swarm poisoning). Keep
 # false unless you trust your peer population; pair with access_list.
 allow_client_ip = false
+# peer_id prefixes excluded from /api/stats top_clients — keeps test/loadgen
+# traffic (peer_id "-TS…") out of client stats. Protocol handling unaffected.
+client_stats_ignore = ["-TS"]
 
 [http]
 enable = true

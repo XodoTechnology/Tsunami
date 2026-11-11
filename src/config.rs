@@ -72,6 +72,11 @@ pub struct ProtocolConfig {
     /// peer lists (swarm poisoning). Only enable for a trusted peer
     /// population, ideally paired with the access list.
     pub allow_client_ip: bool,
+    /// peer_id prefixes excluded from /api/stats top_clients — e.g.
+    /// `["-TS"]` keeps loadgen/test traffic out of client stats.
+    /// Protocol handling is unaffected; only the stats counter skips them.
+    #[serde(default)]
+    pub client_stats_ignore: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -236,6 +241,7 @@ impl Default for ProtocolConfig {
             store_peer_id: false,
             client_stats: true,
             allow_client_ip: false,
+            client_stats_ignore: Vec::new(),
         }
     }
 }

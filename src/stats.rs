@@ -65,6 +65,8 @@ pub type ClientKey = [u8; 8];
 
 pub struct ClientStats {
     stripes: Vec<Mutex<std::collections::HashMap<ClientKey, u64>>>,
+    /// peer_id prefixes excluded from stats (e.g. loadgen's "-TS").
+    ignore: std::sync::OnceLock<Vec<Vec<u8>>>,
 }
 
 impl ClientStats {
@@ -73,13 +75,26 @@ impl ClientStats {
             stripes: (0..CLIENT_STRIPES)
                 .map(|_| Mutex::new(std::collections::HashMap::new()))
                 .collect(),
+            ignore: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Exclude peer_ids starting with any of these prefixes from stats.
+    /// Call once at startup before traffic flows.
+    pub fn set_ignore_prefixes(&self, prefixes: Vec<String>) {
+        let v: Vec<Vec<u8>> = prefixes.into_iter().map(String::into_bytes).collect();
+        let _ = self.ignore.set(v);
     }
 
     /// Record an announce for a peer client, keyed by the 8-byte client
     /// signature at the start of peer_id.
     #[inline]
     pub fn record(&self, peer_id: &[u8; 20]) {
+        if let Some(ign) = self.ignore.get() {
+            if ign.iter().any(|p| peer_id.as_slice().starts_with(p.as_slice())) {
+                return;
+            }
+        }
         let mut key = [0u8; 8];
         key.copy_from_slice(&peer_id[..8]);
         let stripe = (key[0] as usize ^ ((key[1] as usize) << 4)) & (CLIENT_STRIPES - 1);
@@ -432,8 +447,7 @@ impl Stats {
         let client_list: Vec<serde_json::Value> = clients
             .iter()
             .map(|&(k, c)| {
-                let name = String::from_utf8_lossy(&k).trim_matches('\0').to_string();
-                serde_json::json!({ "client": name, "announces": c })
+                serde_json::json!({ "client": crate::peerid::client_name(&k), "announces": c })
             })
             .collect();
 
