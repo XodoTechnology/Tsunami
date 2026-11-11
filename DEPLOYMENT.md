@@ -225,11 +225,38 @@ gate is the simpler option when the port is directly reachable.
 
 `/api/torrent/{hash}` peer lists carry peer IPs. With
 `http.mask_peer_ips = true` (default) they are masked to first+last parts —
-IPv4 `a.xxx.xxx.d`, IPv6 `s0:s1::s7` — so a public dashboard doesn't dump
+IPv4 `a.xxx.xxx.d`, IPv6 `s0:s1:xxxx:xxxx::s7` — so a public dashboard doesn't dump
 full peer addresses. Tracker protocol responses (`/announce`, `/scrape`,
 `/bep15`, WebSocket) always carry full IPs; peers need them to connect.
 Set `mask_peer_ips = false` only if a trusted internal consumer needs the
 full addresses.
+
+## Pulling stats into other systems
+
+For periodic stats pulls (website logging, dashboards, cron jobs), four
+formats cover most pipelines — all read-only GETs, all under the same
+admin auth/allowlist gate as `/api/stats`:
+
+| Endpoint | Format | Best for |
+|---|---|---|
+| `/api/stats` | JSON | structured ingestion (one snapshot) |
+| `/api/stats.csv` | CSV `group,metric,value` | tidy ingest into spreadsheets/DBs — every scalar stat, stable column names |
+| `/api/stats.txt` | `dotted.key=value` lines | shell/awk/grep, simple log appenders |
+| `/api/timeseries.csv` | wide CSV, one row/sec | history logging — append to a file or TSDB |
+| `/api/timeseries?seconds=N` | JSON samples | same data, structured |
+| `/metrics` | Prometheus text | Prometheus/Grafana scrape |
+
+Example cron pull to a flat file:
+
+```sh
+curl -s http://127.0.0.1:18081/api/stats.txt \
+  | sed "s/^/$(date +%s) /" >> stats.log
+```
+
+`/api/timeseries.csv?seconds=3600` returns up to an hour of per-second
+samples (requests/bytes per protocol, swarm counts, RSS, CPU) — poll it on
+a slower cadence (e.g. every 5–15 min) and keep only the newest rows to
+build your own retention window.
 
 ## Client IPs behind a proxy (`http.proxy_ip_header`)
 

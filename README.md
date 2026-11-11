@@ -67,7 +67,7 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
   - `GET /api/torrent/{info_hash_hex}?limit=` — per-torrent detail + peers
     (ip, port, seeder flag, peer_id when `protocol.store_peer_id`).
     Peer IPs are masked by default (`http.mask_peer_ips`): IPv4 shows
-    `a.xxx.xxx.d`, IPv6 `s0:s1::s7`; tracker protocol responses always
+    `a.xxx.xxx.d`, IPv6 `s0:s1:xxxx:xxxx::s7`; tracker protocol responses always
     carry full IPs since peers need them to connect.
   - `GET /api/clients?n=` — top clients by announce count (BEP 20 names)
 - **Prometheus metrics**: `GET /metrics` — counters, gauges, and per-protocol
@@ -152,7 +152,10 @@ Sockets spread across `127/8` loopback aliases for many distinct peers.
 | `/announce` | BEP 3 | GET, bencoded dict |
 | `/scrape` | BEP 12 | GET, repeated `info_hash` params; no params = full scrape (if enabled) |
 | `/api/stats` | JSON | website stats snapshot (per-proto rates, system gauges) |
+| `/api/stats.csv` | CSV | tidy `group,metric,value` export of every scalar stat — for log pipelines |
+| `/api/stats.txt` | text | flat `dotted.key=value` lines — grep/awk/shell friendly |
 | `/api/timeseries` | JSON | `?seconds=` per-second samples for graphs |
+| `/api/timeseries.csv` | CSV | wide per-second samples — history logging |
 | `/api/torrents` | JSON | `?limit=100&offset=0` |
 | `/api/torrent/{hex}` | JSON | `?limit=200` peers |
 | `/api/clients` | JSON | `?n=50` top clients |

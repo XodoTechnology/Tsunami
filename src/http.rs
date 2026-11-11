@@ -290,6 +290,31 @@ fn route(
                 .into_bytes(),
         ),
         "/api/timeseries" => api_timeseries(req.query, stats),
+        "/api/timeseries.csv" => api_timeseries_csv(req.query, stats),
+        "/api/stats.csv" => (
+            200,
+            "text/csv; charset=utf-8",
+            stats
+                .stats_csv(
+                    store.totals(),
+                    store.torrents_created_total(),
+                    store.memory_estimate_bytes(),
+                    VERSION,
+                )
+                .into_bytes(),
+        ),
+        "/api/stats.txt" => (
+            200,
+            "text/plain; charset=utf-8",
+            stats
+                .stats_txt(
+                    store.totals(),
+                    store.torrents_created_total(),
+                    store.memory_estimate_bytes(),
+                    VERSION,
+                )
+                .into_bytes(),
+        ),
         "/metrics" => (
             200,
             "text/plain; version=0.0.4",
@@ -886,7 +911,8 @@ fn api_torrents(query: &str, store: &Arc<Store>) -> Response {
 
 /// Privacy mask for peer IPs in stats APIs: keep the first and last
 /// components visible, mask the middle. IPv4 `a.b.c.d` -> `a.xxx.xxx.d`;
-/// IPv6 -> first two hextets + last hextet (`2001:db8::1` style).
+/// IPv6 -> first two hextets + `xxxx` placeholders + last hextet
+/// (`2001:db8:xxxx:xxxx::1` style).
 fn mask_ip(ip: &IpAddr) -> String {
     match ip {
         IpAddr::V4(v4) => {
@@ -895,7 +921,7 @@ fn mask_ip(ip: &IpAddr) -> String {
         }
         IpAddr::V6(v6) => {
             let s = v6.segments();
-            format!("{:x}:{:x}::{:x}", s[0], s[1], s[7])
+            format!("{:x}:{:x}:xxxx:xxxx::{:x}", s[0], s[1], s[7])
         }
     }
 }
@@ -964,6 +990,18 @@ fn api_timeseries(query: &str, stats: &Arc<Stats>) -> Response {
     )
 }
 
+/// GET /api/timeseries.csv?seconds=N — wide CSV of the same samples,
+/// for log pipelines / spreadsheets / TSDB import.
+fn api_timeseries_csv(query: &str, stats: &Arc<Stats>) -> Response {
+    let params: QueryParams = parse_query(query).into();
+    let seconds = params.get_i64(b"seconds").unwrap_or(300).clamp(10, 3600) as u64;
+    (
+        200,
+        "text/csv; charset=utf-8",
+        stats.timeseries_csv(seconds).into_bytes(),
+    )
+}
+
 fn write_response(
     stream: &mut TcpStream,
     status: u16,
@@ -1017,15 +1055,15 @@ mod tests {
     fn mask_ipv6_keeps_first_two_and_last() {
         assert_eq!(
             mask_ip(&IpAddr::from_str("2001:db8:1:2:3:4:5:6").unwrap()),
-            "2001:db8::6"
+            "2001:db8:xxxx:xxxx::6"
         );
         assert_eq!(
-            mask_ip(&IpAddr::from_str("2000:2000:aaaa:bbbb:cccc:dddd:eeee:1234").unwrap()),
-            "2000:2000::1234"
+            mask_ip(&IpAddr::from_str("2000:3000:aaaa:bbbb:cccc:dddd:eeee:1234").unwrap()),
+            "2000:3000:xxxx:xxxx::1234"
         );
         assert_eq!(
             mask_ip(&IpAddr::from_str("::1").unwrap()),
-            "0:0::1"
+            "0:0:xxxx:xxxx::1"
         );
     }
 }

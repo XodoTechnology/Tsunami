@@ -439,6 +439,168 @@ impl Stats {
         serde_json::json!({ "seconds": seconds, "samples": samples })
     }
 
+    /// Every scalar stat as (dotted-key, formatted-value) pairs — shared by
+    /// the CSV and key=value exporters so the formats can never drift apart.
+    /// Non-scalar data (top_clients, per-torrent lists) has its own endpoints.
+    fn flat_stats(
+        &self,
+        store_totals: (u64, u64, u64, u64),
+        torrents_created: u64,
+        swarm_bytes: u64,
+        version: &str,
+    ) -> Vec<(String, String)> {
+        let uptime = self.started.elapsed().as_secs();
+        let (torrents, peers, seeders, leechers) = store_totals;
+        let rates = self.compute_rates();
+        let mut out: Vec<(String, String)> = Vec::with_capacity(80);
+        macro_rules! put {
+            ($k:expr, $v:expr) => {
+                out.push(($k.to_string(), $v.to_string()))
+            };
+        }
+        put!("meta.version", version);
+        put!("meta.uptime_seconds", uptime);
+        // Windowed rates (fixed 10s trailing window).
+        put!("rates.requests_per_sec", rates.requests_per_sec);
+        put!("rates.bytes_rx_per_sec", rates.bytes_rx_per_sec);
+        put!("rates.bytes_tx_per_sec", rates.bytes_tx_per_sec);
+        put!("rates.peers_added_per_sec", rates.peers_added_per_sec);
+        put!("rates.peers_removed_per_sec", rates.peers_removed_per_sec);
+        for (name, r) in [
+            ("udp_ipv4", rates.udp4),
+            ("udp_ipv6", rates.udp6),
+            ("http", rates.http),
+        ] {
+            put!(&format!("rates.{name}.requests_per_sec"), r.requests_per_sec);
+            put!(&format!("rates.{name}.bytes_rx_per_sec"), r.bytes_rx_per_sec);
+            put!(&format!("rates.{name}.bytes_tx_per_sec"), r.bytes_tx_per_sec);
+        }
+        // Per-protocol cumulative counters.
+        for (name, p) in [
+            ("udp.ipv4", &self.udp_ipv4),
+            ("udp.ipv6", &self.udp_ipv6),
+            ("http", &self.http),
+        ] {
+            let fields: [(&str, u64); 12] = [
+                ("requests", p.requests.load(Ordering::Relaxed)),
+                ("connects", p.connects.load(Ordering::Relaxed)),
+                ("announces", p.announces.load(Ordering::Relaxed)),
+                ("scrapes", p.scrapes.load(Ordering::Relaxed)),
+                ("errors", p.errors.load(Ordering::Relaxed)),
+                ("bytes_rx", p.bytes_rx.load(Ordering::Relaxed)),
+                ("bytes_tx", p.bytes_tx.load(Ordering::Relaxed)),
+                ("dropped", p.dropped.load(Ordering::Relaxed)),
+                ("rate_limited", p.rate_limited.load(Ordering::Relaxed)),
+                ("ev_started", p.ev_started.load(Ordering::Relaxed)),
+                ("ev_completed", p.ev_completed.load(Ordering::Relaxed)),
+                ("ev_stopped", p.ev_stopped.load(Ordering::Relaxed)),
+            ];
+            for (f, v) in fields {
+                put!(&format!("{name}.{f}"), v);
+            }
+        }
+        // Swarm totals.
+        put!("swarm.torrents", torrents);
+        put!("swarm.peers", peers);
+        put!("swarm.seeders", seeders);
+        put!("swarm.leechers", leechers);
+        put!("swarm.peers_added_total", self.peers_added.load(Ordering::Relaxed));
+        put!("swarm.peers_removed_total", self.peers_removed.load(Ordering::Relaxed));
+        put!("swarm.torrents_created_total", torrents_created);
+        // System gauges.
+        put!("system.rss_bytes", self.rss_bytes.load(Ordering::Relaxed));
+        put!(
+            "system.cpu_percent",
+            format!("{:.1}", self.cpu_percent_x10.load(Ordering::Relaxed) as f64 / 10.0)
+        );
+        put!("system.swarm_estimate_bytes", swarm_bytes);
+        // Misc gauges.
+        put!("meta.http_connections", self.http_connections.load(Ordering::Relaxed));
+        put!("meta.cqe_overflow_total", self.cqe_overflow.load(Ordering::Relaxed));
+        out
+    }
+
+    /// CSV export for GET /api/stats.csv — tidy `group,metric,value` rows.
+    pub fn stats_csv(
+        &self,
+        store_totals: (u64, u64, u64, u64),
+        torrents_created: u64,
+        swarm_bytes: u64,
+        version: &str,
+    ) -> String {
+        let mut s = String::with_capacity(8192);
+        s.push_str("group,metric,value\n");
+        for (k, v) in self.flat_stats(store_totals, torrents_created, swarm_bytes, version) {
+            let (g, m) = k.split_once('.').unwrap_or((k.as_str(), ""));
+            s.push_str(g);
+            s.push(',');
+            s.push_str(m);
+            s.push(',');
+            s.push_str(&v);
+            s.push('\n');
+        }
+        s
+    }
+
+    /// key=value export for GET /api/stats.txt — one `dotted.key=value`
+    /// per line, trivially parseable by shells, awk, and log pipelines.
+    pub fn stats_txt(
+        &self,
+        store_totals: (u64, u64, u64, u64),
+        torrents_created: u64,
+        swarm_bytes: u64,
+        version: &str,
+    ) -> String {
+        let mut s = String::with_capacity(8192);
+        for (k, v) in self.flat_stats(store_totals, torrents_created, swarm_bytes, version) {
+            s.push_str(&k);
+            s.push('=');
+            s.push_str(&v);
+            s.push('\n');
+        }
+        s
+    }
+
+    /// Wide CSV of the per-second samples for GET /api/timeseries.csv —
+    /// one row per second, one column per metric (logging/TSDB friendly).
+    pub fn timeseries_csv(&self, seconds: u64) -> String {
+        const HEADER: &str = "t,requests,bytes_rx,bytes_tx,udp4_requests,udp6_requests,http_requests,udp4_bytes_rx,udp6_bytes_rx,http_bytes_rx,udp4_bytes_tx,udp6_bytes_tx,http_bytes_tx,torrents,peers,seeders,leechers,peers_added,peers_removed,rss_bytes,swarm_bytes,cpu_percent\n";
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let cutoff = now_ms.saturating_sub(seconds.saturating_mul(1000));
+        let mut s = String::with_capacity(64 * 1024);
+        s.push_str(HEADER);
+        self.with_samples(|q| {
+            for smp in q.iter().filter(|x| x.ts_ms >= cutoff) {
+                s.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1}\n",
+                    smp.ts_ms / 1000,
+                    smp.requests,
+                    smp.bytes_rx,
+                    smp.bytes_tx,
+                    smp.udp4_requests,
+                    smp.udp6_requests,
+                    smp.http_requests,
+                    smp.udp4_bytes_rx,
+                    smp.udp6_bytes_rx,
+                    smp.http_bytes_rx,
+                    smp.udp4_bytes_tx,
+                    smp.udp6_bytes_tx,
+                    smp.http_bytes_tx,
+                    smp.torrents,
+                    smp.peers,
+                    smp.seeders,
+                    smp.leechers,
+                    smp.peers_added,
+                    smp.peers_removed,
+                    smp.rss_bytes,
+                    smp.swarm_bytes,
+                    smp.cpu_percent_x10 as f64 / 10.0,
+                ));
+            }
+        });
+        s
+    }
+
     /// Prometheus text exposition format for /metrics.
     /// `store_totals` = (torrents, peers, seeders, leechers);
     /// `swarm_bytes` = estimated swarm-store memory.

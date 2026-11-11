@@ -80,7 +80,7 @@ dashboard = true
 # Empty = no IP bypass. Non-listed IPs get 401 (if user set) or 403.
 #admin_allowlist = ["10.0.0.0/8", "192.168.1.5", "fd00::/8"]
 # Mask peer IPs in /api/torrent/{hash} peer lists so stats consumers see
-# only first+last parts (IPv4 a.xxx.xxx.d, IPv6 s0:s1::s7) instead of full
+# only first+last parts (IPv4 a.xxx.xxx.d, IPv6 s0:s1:xxxx:xxxx::s7) instead of full
 # addresses. Tracker protocol responses always carry full IPs — peers need
 # them to connect. Default true; set false to expose full IPs.
 mask_peer_ips = true
