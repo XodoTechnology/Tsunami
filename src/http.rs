@@ -972,8 +972,7 @@ fn api_clients(query: &str, stats: &Arc<Stats>) -> Response {
         .top(n)
         .iter()
         .map(|&(k, c)| {
-            let name = String::from_utf8_lossy(&k).trim_matches('\0').to_string();
-            serde_json::json!({ "client": name, "announces": c })
+            serde_json::json!({ "client": crate::peerid::client_name(&k), "announces": c })
         })
         .collect();
     (200, "application/json", serde_json::json!({ "clients": clients }).to_string().into_bytes())
