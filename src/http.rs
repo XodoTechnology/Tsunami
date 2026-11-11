@@ -722,6 +722,7 @@ fn announce_http(
         return (403, "text/plain", b"info hash not allowed".to_vec());
     }
     if crate::protocol::synthetic_peer_id(&peer_id) {
+        stats.http.blocked.fetch_add(1, Ordering::Relaxed);
         return (400, "text/plain", b"invalid peer_id".to_vec());
     }
 

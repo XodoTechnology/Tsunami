@@ -119,6 +119,9 @@ fi
 say "installing to $PREFIX / $CONFIG_DIR / $STATE_DIR"
 install -d -m 0755 "$BIN_DIR" "$LIBEXECDIR"
 install -d -m 0750 "$CONFIG_DIR"
+# The service user must traverse $CONFIG_DIR to read its 0640 config —
+# group-own the directory (root:$SVC_USER) like the config file itself.
+[ "$SVC_USER" != "root" ] && chown "root:$SVC_USER" "$CONFIG_DIR"
 if [ "$SVC_USER" != "root" ]; then
   install -d -o "$SVC_USER" -g "$SVC_USER" -m 0750 "$STATE_DIR"
 else

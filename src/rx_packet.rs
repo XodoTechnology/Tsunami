@@ -625,9 +625,14 @@ pub fn process_packet(
             protocol::write_connect_response(out, transaction_id, conn_id)
         }
         ParseResult::Ok(ParsedRequest::Announce(req)) => {
-            if !validator.valid(ip, req.connection_id) {
+            // Abuse filters run before conn_id validation: rejected
+            // traffic skips the connection-table lookup entirely.
+            if protocol::synthetic_peer_id(&req.peer_id) {
+                local.blocked.fetch_add(1, Ordering::Relaxed);
+                protocol::write_error_response(out, req.transaction_id, "invalid peer_id")
+            } else if !validator.valid(ip, req.connection_id) {
                 return;
-            }
+            } else {
             let info_hash: InfoHash = req.info_hash;
             if req.port == 0 {
                 local.errors.fetch_add(1, Ordering::Relaxed);
@@ -635,9 +640,6 @@ pub fn process_packet(
             } else if !access_list.allows(&info_hash) {
                 local.errors.fetch_add(1, Ordering::Relaxed);
                 protocol::write_error_response(out, req.transaction_id, "info hash not allowed")
-            } else if protocol::synthetic_peer_id(&req.peer_id) {
-                local.errors.fetch_add(1, Ordering::Relaxed);
-                protocol::write_error_response(out, req.transaction_id, "invalid peer_id")
             } else {
                 if !rl.allow_announce() {
                     local.rate_limited.fetch_add(1, Ordering::Relaxed);
@@ -696,6 +698,7 @@ pub fn process_packet(
                         return;
                     }
                 }
+            }
             }
         }
         ParseResult::Ok(ParsedRequest::Scrape { connection_id, transaction_id, hashes }) => {

@@ -20,6 +20,7 @@ pub struct ProtoStats {
     pub bytes_tx: AtomicU64,
     pub dropped: AtomicU64,      // responses dropped (no send buffer)
     pub rate_limited: AtomicU64, // requests shed by the rate limiter
+    pub blocked: AtomicU64,      // requests rejected by abuse filters
     // Announce lifecycle events (BEP-15/3 `event` field). Regular announces
     // (event=None) are `announces - (started+completed+stopped)`.
     pub ev_started: AtomicU64,
@@ -48,6 +49,8 @@ impl ProtoStats {
             .fetch_add(other.dropped.load(Ordering::Relaxed), Ordering::Relaxed);
         self.rate_limited
             .fetch_add(other.rate_limited.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.blocked
+            .fetch_add(other.blocked.load(Ordering::Relaxed), Ordering::Relaxed);
         self.ev_started
             .fetch_add(other.ev_started.load(Ordering::Relaxed), Ordering::Relaxed);
         self.ev_completed
@@ -157,14 +160,17 @@ pub struct RateSample {
     pub udp4_connects: u64,
     pub udp4_scrapes: u64,
     pub udp4_errors: u64,
+    pub udp4_blocked: u64,
     pub udp6_announces: u64,
     pub udp6_connects: u64,
     pub udp6_scrapes: u64,
     pub udp6_errors: u64,
+    pub udp6_blocked: u64,
     pub http_announces: u64,
     pub http_connects: u64,
     pub http_scrapes: u64,
     pub http_errors: u64,
+    pub http_blocked: u64,
     // Swarm gauges (instantaneous).
     pub torrents: u64,
     pub peers: u64,
@@ -222,6 +228,7 @@ pub struct ProtoRate {
     pub connects_per_sec: u64,
     pub scrapes_per_sec: u64,
     pub errors_per_sec: u64,
+    pub blocked_per_sec: u64,
 }
 
 /// Windowed rates over a fixed trailing window, combined + per-protocol.
@@ -283,14 +290,17 @@ impl Stats {
             udp4_connects: self.udp_ipv4.connects.load(Ordering::Relaxed),
             udp4_scrapes: self.udp_ipv4.scrapes.load(Ordering::Relaxed),
             udp4_errors: self.udp_ipv4.errors.load(Ordering::Relaxed),
+            udp4_blocked: self.udp_ipv4.blocked.load(Ordering::Relaxed),
             udp6_announces: self.udp_ipv6.announces.load(Ordering::Relaxed),
             udp6_connects: self.udp_ipv6.connects.load(Ordering::Relaxed),
             udp6_scrapes: self.udp_ipv6.scrapes.load(Ordering::Relaxed),
             udp6_errors: self.udp_ipv6.errors.load(Ordering::Relaxed),
+            udp6_blocked: self.udp_ipv6.blocked.load(Ordering::Relaxed),
             http_announces: self.http.announces.load(Ordering::Relaxed),
             http_connects: self.http.connects.load(Ordering::Relaxed),
             http_scrapes: self.http.scrapes.load(Ordering::Relaxed),
             http_errors: self.http.errors.load(Ordering::Relaxed),
+            http_blocked: self.http.blocked.load(Ordering::Relaxed),
             torrents: gauges.torrents,
             peers: gauges.peers,
             seeders: gauges.seeders,
@@ -362,33 +372,36 @@ impl Stats {
             Some(b) => (b.udp4_bytes_tx, b.udp6_bytes_tx, b.http_bytes_tx),
             None => (0, 0, 0),
         };
-        // Action counters: (announces, connects, scrapes, errors) per proto.
-        let (u4an, u4cn, u4sn, u4en) = match base {
+        // Action counters: (announces, connects, scrapes, errors, blocked) per proto.
+        let (u4an, u4cn, u4sn, u4en, u4bn) = match base {
             Some(b) => (
                 b.udp4_announces,
                 b.udp4_connects,
                 b.udp4_scrapes,
                 b.udp4_errors,
+                b.udp4_blocked,
             ),
-            None => (0, 0, 0, 0),
+            None => (0, 0, 0, 0, 0),
         };
-        let (u6an, u6cn, u6sn, u6en) = match base {
+        let (u6an, u6cn, u6sn, u6en, u6bn) = match base {
             Some(b) => (
                 b.udp6_announces,
                 b.udp6_connects,
                 b.udp6_scrapes,
                 b.udp6_errors,
+                b.udp6_blocked,
             ),
-            None => (0, 0, 0, 0),
+            None => (0, 0, 0, 0, 0),
         };
-        let (han, hcn, hsn, hen) = match base {
+        let (han, hcn, hsn, hen, hbn) = match base {
             Some(b) => (
                 b.http_announces,
                 b.http_connects,
                 b.http_scrapes,
                 b.http_errors,
+                b.http_blocked,
             ),
-            None => (0, 0, 0, 0),
+            None => (0, 0, 0, 0, 0),
         };
 
         Rates {
@@ -403,6 +416,7 @@ impl Stats {
                 connects_per_sec: per(self.udp_ipv4.connects.load(Ordering::Relaxed), u4cn),
                 scrapes_per_sec: per(self.udp_ipv4.scrapes.load(Ordering::Relaxed), u4sn),
                 errors_per_sec: per(self.udp_ipv4.errors.load(Ordering::Relaxed), u4en),
+                blocked_per_sec: per(self.udp_ipv4.blocked.load(Ordering::Relaxed), u4bn),
             },
             udp6: ProtoRate {
                 requests_per_sec: per(self.udp_ipv6.requests.load(Ordering::Relaxed), u6r),
@@ -412,6 +426,7 @@ impl Stats {
                 connects_per_sec: per(self.udp_ipv6.connects.load(Ordering::Relaxed), u6cn),
                 scrapes_per_sec: per(self.udp_ipv6.scrapes.load(Ordering::Relaxed), u6sn),
                 errors_per_sec: per(self.udp_ipv6.errors.load(Ordering::Relaxed), u6en),
+                blocked_per_sec: per(self.udp_ipv6.blocked.load(Ordering::Relaxed), u6bn),
             },
             http: ProtoRate {
                 requests_per_sec: per(self.http.requests.load(Ordering::Relaxed), hr),
@@ -421,6 +436,7 @@ impl Stats {
                 connects_per_sec: per(self.http.connects.load(Ordering::Relaxed), hcn),
                 scrapes_per_sec: per(self.http.scrapes.load(Ordering::Relaxed), hsn),
                 errors_per_sec: per(self.http.errors.load(Ordering::Relaxed), hen),
+                blocked_per_sec: per(self.http.blocked.load(Ordering::Relaxed), hbn),
             },
             peers_added_per_sec: per(self.peers_added.load(Ordering::Relaxed), b_padd),
             peers_removed_per_sec: per(self.peers_removed.load(Ordering::Relaxed), b_prem),
@@ -571,6 +587,7 @@ impl Stats {
             put!(&format!("rates.{name}.connects_per_sec"), r.connects_per_sec);
             put!(&format!("rates.{name}.scrapes_per_sec"), r.scrapes_per_sec);
             put!(&format!("rates.{name}.errors_per_sec"), r.errors_per_sec);
+            put!(&format!("rates.{name}.blocked_per_sec"), r.blocked_per_sec);
         }
         // Per-protocol cumulative counters.
         for (name, p) in [
@@ -578,12 +595,13 @@ impl Stats {
             ("udp.ipv6", &self.udp_ipv6),
             ("http", &self.http),
         ] {
-            let fields: [(&str, u64); 12] = [
+            let fields: [(&str, u64); 13] = [
                 ("requests", p.requests.load(Ordering::Relaxed)),
                 ("connects", p.connects.load(Ordering::Relaxed)),
                 ("announces", p.announces.load(Ordering::Relaxed)),
                 ("scrapes", p.scrapes.load(Ordering::Relaxed)),
                 ("errors", p.errors.load(Ordering::Relaxed)),
+                ("blocked", p.blocked.load(Ordering::Relaxed)),
                 ("bytes_rx", p.bytes_rx.load(Ordering::Relaxed)),
                 ("bytes_tx", p.bytes_tx.load(Ordering::Relaxed)),
                 ("dropped", p.dropped.load(Ordering::Relaxed)),
@@ -835,6 +853,7 @@ fn proto_rate_json(r: &ProtoRate) -> serde_json::Value {
         "connects_per_sec": r.connects_per_sec,
         "scrapes_per_sec": r.scrapes_per_sec,
         "errors_per_sec": r.errors_per_sec,
+        "blocked_per_sec": r.blocked_per_sec,
     })
 }
 
@@ -845,6 +864,7 @@ fn proto_json(p: &ProtoStats) -> serde_json::Value {
         "announces": p.announces.load(Ordering::Relaxed),
         "scrapes": p.scrapes.load(Ordering::Relaxed),
         "errors": p.errors.load(Ordering::Relaxed),
+        "blocked": p.blocked.load(Ordering::Relaxed),
         "bytes_rx": p.bytes_rx.load(Ordering::Relaxed),
         "bytes_tx": p.bytes_tx.load(Ordering::Relaxed),
         "dropped": p.dropped.load(Ordering::Relaxed),
@@ -874,6 +894,7 @@ fn proto_prom(s: &mut String, proto: &str, ipver: &str, p: &ProtoStats) {
     m!("announces_total", "Announce requests", p.announces.load(Ordering::Relaxed), "counter");
     m!("scrapes_total", "Scrape requests", p.scrapes.load(Ordering::Relaxed), "counter");
     m!("errors_total", "Errors", p.errors.load(Ordering::Relaxed), "counter");
+    m!("blocked_total", "Requests blocked by abuse filters", p.blocked.load(Ordering::Relaxed), "counter");
     m!("dropped_total", "Dropped responses", p.dropped.load(Ordering::Relaxed), "counter");
     m!("rate_limited_total", "Requests shed by rate limiter", p.rate_limited.load(Ordering::Relaxed), "counter");
     m!("ev_started_total", "Announce started events", p.ev_started.load(Ordering::Relaxed), "counter");

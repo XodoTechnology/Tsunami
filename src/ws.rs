@@ -281,6 +281,11 @@ pub(crate) fn dispatch(
             b
         }
         ParseResult::Ok(ParsedRequest::Announce(req)) => {
+            // Abuse filters run before conn_id validation.
+            if protocol::synthetic_peer_id(&req.peer_id) {
+                stats.http.blocked.fetch_add(1, Ordering::Relaxed);
+                return Some(err_resp(req.transaction_id, "invalid peer_id"));
+            }
             if !validator.valid(ip, req.connection_id) {
                 return None;
             }
@@ -288,10 +293,6 @@ pub(crate) fn dispatch(
             if !access_list.allows(&info_hash) {
                 stats.http.errors.fetch_add(1, Ordering::Relaxed);
                 return Some(err_resp(req.transaction_id, "info hash not allowed"));
-            }
-            if protocol::synthetic_peer_id(&req.peer_id) {
-                stats.http.errors.fetch_add(1, Ordering::Relaxed);
-                return Some(err_resp(req.transaction_id, "invalid peer_id"));
             }
             stats.http.announces.fetch_add(1, Ordering::Relaxed);
             // WS clients may not have a UDP port; fall back to the TCP

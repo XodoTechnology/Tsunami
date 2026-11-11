@@ -56,6 +56,7 @@ struct LocalStats {
     bytes_tx: u64,
     dropped: u64,
     rate_limited: u64,
+    blocked: u64,
     peers_added: u64,
     peers_removed: u64,
     ev_started: u64,
@@ -75,6 +76,7 @@ impl LocalStats {
         g.dropped.fetch_add(self.dropped, Ordering::Relaxed);
         g.rate_limited
             .fetch_add(self.rate_limited, Ordering::Relaxed);
+        g.blocked.fetch_add(self.blocked, Ordering::Relaxed);
         stats
             .peers_added
             .fetch_add(self.peers_added, Ordering::Relaxed);
@@ -381,6 +383,15 @@ impl Worker {
                 });
             }
             ParseResult::Ok(ParsedRequest::Announce(req)) => {
+                // Abuse filters run before conn_id validation: rejected
+                // traffic skips the connection-table lookup entirely.
+                if protocol::synthetic_peer_id(&req.peer_id) {
+                    self.local_mut(is_v4_sock).blocked += 1;
+                    self.emit_simple(addr, is_v4_sock, move |b| {
+                        protocol::write_error_response(b, req.transaction_id, "invalid peer_id")
+                    });
+                    return;
+                }
                 if !self.validator.valid(ip, req.connection_id) {
                     return;
                 }
@@ -396,13 +407,6 @@ impl Worker {
                     self.local_mut(is_v4_sock).errors += 1;
                     self.emit_simple(addr, is_v4_sock, move |b| {
                         protocol::write_error_response(b, req.transaction_id, "info hash not allowed")
-                    });
-                    return;
-                }
-                if protocol::synthetic_peer_id(&req.peer_id) {
-                    self.local_mut(is_v4_sock).errors += 1;
-                    self.emit_simple(addr, is_v4_sock, move |b| {
-                        protocol::write_error_response(b, req.transaction_id, "invalid peer_id")
                     });
                     return;
                 }
