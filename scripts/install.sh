@@ -81,12 +81,21 @@ say() { echo "== $*"; }
 
 # --- 1. build / locate binary ------------------------------------------------
 say "binary"
+# sudo strips ~/.cargo/bin from PATH — look for cargo in the usual spots.
+if ! command -v cargo >/dev/null 2>&1; then
+  for d in /root/.cargo/bin "$HOME/.cargo/bin" /usr/local/cargo/bin \
+           "${SUDO_USER:+/home/$SUDO_USER/.cargo/bin}"; do
+    if [ -x "$d/cargo" ]; then export PATH="$d:$PATH"; break; fi
+  done
+fi
 if [ -n "$BINARY" ]; then
   [ -f "$BINARY" ] || { echo "--binary not found: $BINARY" >&2; exit 1; }
 elif [ "$NO_BUILD" = 1 ]; then
   BINARY="$REPO/target/release/tsunami"
   [ -f "$BINARY" ] || { echo "no prebuilt binary at $BINARY (run cargo build --release)" >&2; exit 1; }
 else
+  command -v cargo >/dev/null 2>&1 || \
+    { echo "cargo not found — install Rust, or pass --binary/--no-build" >&2; exit 1; }
   say "cargo build --release (in $REPO)"
   (cd "$REPO" && cargo build --release --bin tsunami)
   BINARY="$REPO/target/release/tsunami"
