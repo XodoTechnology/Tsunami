@@ -221,6 +221,16 @@ If you terminate TLS at a reverse proxy, you can also just don't expose
 `18081`-style ports publicly and let the proxy inject auth — Tsunami's own
 gate is the simpler option when the port is directly reachable.
 
+### Peer-IP masking
+
+`/api/torrent/{hash}` peer lists carry peer IPs. With
+`http.mask_peer_ips = true` (default) they are masked to first+last parts —
+IPv4 `a.xxx.xxx.d`, IPv6 `s0:s1::s7` — so a public dashboard doesn't dump
+full peer addresses. Tracker protocol responses (`/announce`, `/scrape`,
+`/bep15`, WebSocket) always carry full IPs; peers need them to connect.
+Set `mask_peer_ips = false` only if a trusted internal consumer needs the
+full addresses.
+
 ## Client IPs behind a proxy (`http.proxy_ip_header`)
 
 When Tsunami sits behind a reverse proxy / TLS terminator / load balancer,

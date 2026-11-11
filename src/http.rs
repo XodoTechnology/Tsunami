@@ -323,7 +323,7 @@ fn route(
         }
         _ => {
             if let Some(hex) = req.path.strip_prefix("/api/torrent/") {
-                api_torrent(hex, req.query, store)
+                api_torrent(hex, req.query, store, config.http.mask_peer_ips)
             } else {
                 (404, "text/plain", b"not found".to_vec())
             }
@@ -884,7 +884,23 @@ fn api_torrents(query: &str, store: &Arc<Store>) -> Response {
     )
 }
 
-fn api_torrent(hex: &str, query: &str, store: &Arc<Store>) -> Response {
+/// Privacy mask for peer IPs in stats APIs: keep the first and last
+/// components visible, mask the middle. IPv4 `a.b.c.d` -> `a.xxx.xxx.d`;
+/// IPv6 -> first two hextets + last hextet (`2001:db8::1` style).
+fn mask_ip(ip: &IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{}.xxx.xxx.{}", o[0], o[3])
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}::{:x}", s[0], s[1], s[7])
+        }
+    }
+}
+
+fn api_torrent(hex: &str, query: &str, store: &Arc<Store>, mask_ips: bool) -> Response {
     let Some(hash) = crate::access::parse_infohash_hex(hex) else {
         return (400, "text/plain", b"bad info hash".to_vec());
     };
@@ -897,7 +913,7 @@ fn api_torrent(hex: &str, query: &str, store: &Arc<Store>) -> Response {
         .iter()
         .map(|(p, seeder)| {
             let mut o = serde_json::json!({
-                "ip": p.ip.to_string(),
+                "ip": if mask_ips { mask_ip(&p.ip) } else { p.ip.to_string() },
                 "port": p.port,
                 "seeder": seeder,
             });
@@ -914,6 +930,7 @@ fn api_torrent(hex: &str, query: &str, store: &Arc<Store>) -> Response {
             "info_hash": crate::access::infohash_hex(&hash),
             "seeders": seeders,
             "leechers": leechers,
+            "ip_masked": mask_ips,
             "peers": peer_list,
         })
         .to_string()
@@ -972,4 +989,43 @@ fn write_response(
     stream.write_all(body)?;
     stream.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_ip;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    #[test]
+    fn mask_ipv4_keeps_first_and_last() {
+        assert_eq!(
+            mask_ip(&IpAddr::from_str("185.121.170.11").unwrap()),
+            "185.xxx.xxx.11"
+        );
+        assert_eq!(
+            mask_ip(&IpAddr::from_str("127.0.0.1").unwrap()),
+            "127.xxx.xxx.1"
+        );
+        assert_eq!(
+            mask_ip(&IpAddr::from_str("10.0.0.0").unwrap()),
+            "10.xxx.xxx.0"
+        );
+    }
+
+    #[test]
+    fn mask_ipv6_keeps_first_two_and_last() {
+        assert_eq!(
+            mask_ip(&IpAddr::from_str("2001:db8:1:2:3:4:5:6").unwrap()),
+            "2001:db8::6"
+        );
+        assert_eq!(
+            mask_ip(&IpAddr::from_str("2000:2000:aaaa:bbbb:cccc:dddd:eeee:1234").unwrap()),
+            "2000:2000::1234"
+        );
+        assert_eq!(
+            mask_ip(&IpAddr::from_str("::1").unwrap()),
+            "0:0::1"
+        );
+    }
 }

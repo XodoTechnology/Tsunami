@@ -65,7 +65,10 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
   - `GET /api/timeseries?seconds=` — per-second samples for graphing
   - `GET /api/torrents?limit=&offset=` — torrent list sorted by swarm size
   - `GET /api/torrent/{info_hash_hex}?limit=` — per-torrent detail + peers
-    (ip, port, seeder flag, peer_id when `protocol.store_peer_id`)
+    (ip, port, seeder flag, peer_id when `protocol.store_peer_id`).
+    Peer IPs are masked by default (`http.mask_peer_ips`): IPv4 shows
+    `a.xxx.xxx.d`, IPv6 `s0:s1::s7`; tracker protocol responses always
+    carry full IPs since peers need them to connect.
   - `GET /api/clients?n=` — top clients by announce count (BEP 20 names)
 - **Prometheus metrics**: `GET /metrics` — counters, gauges, and per-protocol
   rates in Prometheus text format (Grafana/alerting ready).

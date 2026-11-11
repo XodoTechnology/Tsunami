@@ -478,7 +478,8 @@ function openTorrent(hash) {
         `<span style="color:var(--green)">${fmtI(d.seeders)} seeders</span> · ` +
         `<span style="color:var(--amber)">${fmtI(d.leechers)} leechers</span> · ` +
         `${fmtI(peers.length)} peers shown` +
-        (peers.length < (d.seeders + d.leechers) ? ` <span class="dim">(of ${fmtI(d.seeders + d.leechers)} total — capped)</span>` : '');
+        (peers.length < (d.seeders + d.leechers) ? ` <span class="dim">(of ${fmtI(d.seeders + d.leechers)} total — capped)</span>` : '') +
+        (d.ip_masked ? ` <span class="badge" style="color:var(--muted);border-color:var(--border)">IPs masked</span>` : '');
       $('tm_body').innerHTML = peers.length ? `<table><thead><tr>
         <th>IP</th><th class="num">Port</th><th>Type</th><th>Peer ID</th>
         </tr></thead><tbody>` + peers.map(p =>

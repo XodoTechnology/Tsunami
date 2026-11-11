@@ -112,6 +112,12 @@ pub struct HttpConfig {
     /// password auth entirely (for Prometheus/Grafana/monitoring). Empty =
     /// no IP-based bypass.
     pub admin_allowlist: Vec<String>,
+    /// Mask peer IPs in the stats API (`/api/torrent/{hash}` peer lists)
+    /// so dashboards/public consumers see only the first and last parts:
+    /// IPv4 `a.b.c.d` -> `a.xxx.xxx.d`, IPv6 -> `s0:s1::s7`. Tracker protocol
+    /// responses (announce/scrape/WS/`/bep15`) always carry full IPs —
+    /// peers need them to connect. Set false to expose full IPs.
+    pub mask_peer_ips: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -247,6 +253,7 @@ impl Default for HttpConfig {
             admin_user: String::new(),
             admin_password: String::new(),
             admin_allowlist: Vec::new(),
+            mask_peer_ips: true,
         }
     }
 }
