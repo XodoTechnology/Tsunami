@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tsunami Tracker</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9InRnIiB4MT0iNiIgeTE9IjI0IiB4Mj0iNTIiIHkyPSI1NiIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiM0ZjhjZmYiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSIjYTA2YmZmIi8+CiAgICA8L2xpbmVhckdyYWRpZW50PgogIDwvZGVmcz4KICA8cGF0aCBkPSJNNiA1NlY0MGM0IDAgNi0xMCAxNC0xMyA4LTMgMTQgMSAyMCA1IDQgMi41IDcgMyAxMiAzVjU2SDZaIiBmaWxsPSJ1cmwoI3RnKSIvPgogIDxwYXRoIGQ9Ik02IDU2VjQ5YzUtMSA4LTYgMTQtOCA2LTIgMTAgMCAxNiAzIDQgMiA4IDIgMTIgMlY1Nkg2WiIgZmlsbD0iIzBiMGUxNCIgb3BhY2l0eT0iLjI4Ii8+Cjwvc3ZnPgo=">
+<link rel="alternate icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABmJLR0QA/wD/AP+gvaeTAAACDklEQVRYhe2UwWoTURSGv3NvEtOxKdWNtFBcCW58gaKgD6ELpSAIrty5sEuhtlqEulIQ1EdQEHf6BC5dVEGEQkEwYhqTmMkkzRwXnYl3khkyAcXN/DDcM/feOf9//nPvQIECBQoUKPCfIXk2Xd/SC3bITQsXjbJklMAquxLyejjgyeP78uOfCFh7qMdLfV4Y5YpRMAo2Gp24Y5WnMmBje1t+/jUBl3d0bs7nXUlZTSUmKciGfBXh1uamvJpFgMla8Ho8t7Aq0aZ4HMURscQjLNuQl3fX9e29O3pe0VztTd20tqU3rPLMZtueGTtz+0Z5b4Q9O+Tw9o6sp3GVxieubugZqzxKVKeTFY+7knDn6FkxsGLDkc2pAhItuPZAz5UtbwRq4wmntiBNpBNnIeGADfkwkSRUgm6DoFtn2GtjVLGmgndskQXvFCXrTReRzZ8UMP7hYdCm/f0Tg34nkTikS8tv0m7uMV89yYnaabzKYrpTzOCAq7jb2qfT+IKEOkoWJ8Rpg+836HcbVMvzLHhLeOUaFakiYhApISr5BQigw4CD+kf6/gE2EuNaHBO7MQr9oEMj+EwzdjFaO7t8KX8LWvVdgl/1o6r1jysSkZhITEzguiIZ7zO1oNf5NmrBhN1OPFrXMUFpLk25BYlrGFtlclgvmiRMi92Dm0+AcwizqjNpa45LrkMxQeb/vkAB4DfWHg7HrRZ+lQAAAABJRU5ErkJggg==">
 <style>
   :root {
     --bg: #0b0e14; --panel: #12161f; --panel2: #171c27; --border: #232a38;
@@ -17,8 +19,8 @@
     padding: 24px; max-width: 1280px; margin: 0 auto;
   }
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
-  h1 { font-size: 22px; font-weight: 650; letter-spacing: .3px; }
-  h1 .dot { color: var(--accent); }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: .3px; display: flex; align-items: center; gap: 10px; }
+  h1 .logo { width: 34px; height: 34px; flex: none; filter: drop-shadow(0 2px 6px rgba(79,140,255,.25)); }
   .sub { color: var(--muted); font-size: 13px; }
   .live { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 12px; }
   .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: p 1.6s infinite; }
@@ -148,7 +150,7 @@
 </head>
 <body>
 <header>
-  <h1>Tsunami<span class="dot">●</span> Tracker</h1>
+  <h1><svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="thg" x1="6" y1="24" x2="52" y2="56" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4f8cff"/><stop offset="1" stop-color="#a06bff"/></linearGradient></defs><path d="M6 56V40c4 0 6-10 14-13 8-3 14 1 20 5 4 2.5 7 3 12 3V56H6Z" fill="url(#thg)"/><path d="M6 56V49c5-1 8-6 14-8 6-2 10 0 16 3 4 2 8 2 12 2V56H6Z" fill="#0b0e14" opacity=".28"/></svg>Tsunami Tracker</h1>
   <span class="sub" id="ver"></span>
   <span class="live">
     <span class="pulse"></span><span id="upd">connecting…</span>

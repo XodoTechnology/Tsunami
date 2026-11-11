@@ -1,5 +1,7 @@
 # Tsunami
 
+![Tsunami](logo.svg)
+
 High-performance BitTorrent tracker — UDP-first (BEP 15), with an HTTP
 tracker plane (BEP 3/12) and a JSON stats API for website integration.
 
