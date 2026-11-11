@@ -41,6 +41,7 @@ fn main() -> anyhow::Result<()> {
     log::info!("tsunami v{VERSION} starting");
 
     let stats = Stats::new();
+    spawn_rate_sampler(&stats);
     let shards = config.network.swarm_shards.max(1).next_power_of_two();
     let store = Arc::new(Store::new(
         shards,
@@ -219,6 +220,19 @@ fn write_scrape_export(store: &Store, path: &std::path::Path) -> anyhow::Result<
     drop(f);
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Feeds the stats rate ring once per second so windowed rates are
+/// independent of who/when stats endpoints are polled.
+fn spawn_rate_sampler(stats: &Arc<Stats>) {
+    let stats = stats.clone();
+    std::thread::Builder::new()
+        .name("rate-sampler".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(tsunami::stats::RATE_SAMPLE_MS));
+            stats.push_rate_sample();
+        })
+        .expect("spawn rate sampler");
 }
 
 fn spawn_maintenance(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {

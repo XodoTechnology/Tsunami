@@ -1,7 +1,7 @@
 //! Global statistics: atomics updated by workers, JSON snapshot for the
 //! HTTP stats API and optional file export.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -95,17 +95,28 @@ pub struct Stats {
     /// Active HTTP connections.
     pub http_connections: AtomicU64,
     pub client_stats: ClientStats,
-    /// Last snapshot for rate computation.
-    snapshot: Mutex<StatsSnapshot>,
+    /// Ring of per-second cumulative-counter samples feeding windowed rates.
+    /// Fed by a dedicated sampler thread so every consumer (/api/stats,
+    /// /metrics, the maintenance log) sees the SAME window regardless of
+    /// poll timing.
+    rate_samples: Mutex<VecDeque<RateSample>>,
 }
 
-#[derive(Clone)]
-struct StatsSnapshot {
-    ts: Instant,
+/// One point-in-time cumulative-counter reading (milliseconds since start).
+#[derive(Clone, Copy)]
+struct RateSample {
+    ts_ms: u64,
     requests: u64,
     bytes_rx: u64,
     bytes_tx: u64,
 }
+
+/// How often the sampler thread records a point (drives ring density).
+pub const RATE_SAMPLE_MS: u64 = 1_000;
+/// How long the ring retains samples.
+const RATE_RING_MS: u64 = 120_000;
+/// Trailing window over which per-second rates are computed.
+const RATE_WINDOW_MS: u64 = 10_000;
 
 impl Stats {
     pub fn new() -> Arc<Self> {
@@ -118,13 +129,33 @@ impl Stats {
             peers_removed: AtomicU64::new(0),
             http_connections: AtomicU64::new(0),
             client_stats: ClientStats::new(),
-            snapshot: Mutex::new(StatsSnapshot {
-                ts: Instant::now(),
-                requests: 0,
-                bytes_rx: 0,
-                bytes_tx: 0,
-            }),
+            rate_samples: Mutex::new(VecDeque::with_capacity(
+                (RATE_RING_MS / RATE_SAMPLE_MS) as usize + 2,
+            )),
         })
+    }
+
+    /// Record the current cumulative counters into the rate ring. Called by
+    /// the sampler thread once per RATE_SAMPLE_MS; also safe to call more
+    /// often (it just adds denser samples).
+    pub fn push_rate_sample(&self) {
+        let ts_ms = self.started.elapsed().as_millis() as u64;
+        let sample = RateSample {
+            ts_ms,
+            requests: self.total_requests(),
+            bytes_rx: self.total_bytes_rx(),
+            bytes_tx: self.total_bytes_tx(),
+        };
+        let mut q = self.rate_samples.lock().unwrap();
+        q.push_back(sample);
+        // Evict samples older than the ring horizon (and enforce a hard cap).
+        while let Some(&front) = q.front() {
+            if ts_ms.saturating_sub(front.ts_ms) > RATE_RING_MS || q.len() > 256 {
+                q.pop_front();
+            } else {
+                break;
+            }
+        }
     }
 
     /// JSON-serializable snapshot for /api/stats.
@@ -175,24 +206,40 @@ impl Stats {
         })
     }
 
-    /// Per-second rates since the previous call (requests, rx B/s, tx B/s).
+    /// Per-second rates over a fixed trailing window (requests, rx B/s,
+    /// tx B/s). Read-only: the rate is (now - sample@window-ago) / window,
+    /// so every consumer sees the same value regardless of poll order.
     fn compute_rates(&self) -> (u64, u64, u64) {
-        let mut snap = self.snapshot.lock().unwrap();
-        let now = Instant::now();
-        let dt = now.duration_since(snap.ts).as_secs_f64().max(0.001);
+        let now_ms = self.started.elapsed().as_millis() as u64;
         let cur_req = self.total_requests();
         let cur_rx = self.total_bytes_rx();
         let cur_tx = self.total_bytes_tx();
-        let r = (
-            ((cur_req - snap.requests) as f64 / dt) as u64,
-            ((cur_rx - snap.bytes_rx) as f64 / dt) as u64,
-            ((cur_tx - snap.bytes_tx) as f64 / dt) as u64,
-        );
-        snap.ts = now;
-        snap.requests = cur_req;
-        snap.bytes_rx = cur_rx;
-        snap.bytes_tx = cur_tx;
-        r
+
+        let q = self.rate_samples.lock().unwrap();
+        // Newest sample at or before the window start is the rate baseline.
+        let target = now_ms.saturating_sub(RATE_WINDOW_MS);
+        let base = q
+            .iter()
+            .rev()
+            .find(|s| s.ts_ms <= target)
+            .or_else(|| q.front());
+
+        let (dt_ms, b_req, b_rx, b_tx) = match base {
+            Some(b) => (
+                now_ms.saturating_sub(b.ts_ms).max(1),
+                b.requests,
+                b.bytes_rx,
+                b.bytes_tx,
+            ),
+            // No samples yet (first second after boot): rate since start.
+            None => (now_ms.max(1), 0, 0, 0),
+        };
+        let dt = dt_ms as f64 / 1000.0;
+        (
+            ((cur_req.saturating_sub(b_req)) as f64 / dt) as u64,
+            ((cur_rx.saturating_sub(b_rx)) as f64 / dt) as u64,
+            ((cur_tx.saturating_sub(b_tx)) as f64 / dt) as u64,
+        )
     }
 
     /// Prometheus text exposition format for /metrics.

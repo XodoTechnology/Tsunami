@@ -21,6 +21,9 @@ use crate::swarm::{AnnounceEvent as SwarmEvent, InfoHash, PeerEndpoint, Rng, Sto
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Self-contained HTML stats dashboard (no external assets/CDN).
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
 pub fn run_http(
     config: Config,
     store: Arc<Store>,
@@ -278,11 +281,23 @@ fn route(
         ),
         "/api/torrents" => api_torrents(req.query, store),
         "/api/clients" => api_clients(req.query, stats),
-        "/" => (
-            200,
-            "text/plain",
-            format!("Tsunami tracker v{VERSION}\n").into_bytes(),
-        ),
+        "/" | "/dashboard" => {
+            if config.http.dashboard {
+                (
+                    200,
+                    "text/html; charset=utf-8",
+                    DASHBOARD_HTML.as_bytes().to_vec(),
+                )
+            } else if req.path == "/" {
+                (
+                    200,
+                    "text/plain",
+                    format!("Tsunami tracker v{VERSION}\n").into_bytes(),
+                )
+            } else {
+                (404, "text/plain", b"not found".to_vec())
+            }
+        }
         _ => {
             if let Some(hex) = req.path.strip_prefix("/api/torrent/") {
                 api_torrent(hex, req.query, store)

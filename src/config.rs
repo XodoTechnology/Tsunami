@@ -96,6 +96,9 @@ pub struct HttpConfig {
     /// always sets or overwrites this header — otherwise clients can spoof
     /// it to forge peer identity and evade per-IP controls.
     pub proxy_ip_header: String,
+    /// Serve a self-contained HTML stats dashboard at `/` and `/dashboard`.
+    /// It only exposes the same data as the public JSON APIs.
+    pub dashboard: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,6 +230,7 @@ impl Default for HttpConfig {
             max_request_bytes: 256 * 1024,
             full_scrape: false,
             proxy_ip_header: String::new(),
+            dashboard: true,
         }
     }
 }

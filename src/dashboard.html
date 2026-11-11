@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsunami Tracker</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #12161f; --panel2: #171c27; --border: #232a38;
+    --text: #dbe2ee; --muted: #8b95a9; --accent: #4f8cff; --green: #3ecf8e;
+    --amber: #f0b44c; --red: #ef6a6a; --purple: #a06bff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 24px; max-width: 1200px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: .3px; }
+  h1 .dot { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: p 1.6s infinite; }
+  @keyframes p { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+  .grid { display: grid; gap: 14px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .value { font-size: 26px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .card .value.green { color: var(--green); } .card .value.amber { color: var(--amber); }
+  .card .value.blue { color: var(--accent); } .card .value.purple { color: var(--purple); }
+
+  .cols { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .panel h2 {
+    font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .6px; padding: 14px 18px; border-bottom: 1px solid var(--border);
+  }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 9px 18px; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  tbody tr + tr { border-top: 1px solid var(--border); }
+  td.num, th.num { text-align: right; }
+  .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--accent); }
+  .client { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .empty { padding: 22px 18px; color: var(--muted); text-align: center; }
+  .kv { display: flex; justify-content: space-between; padding: 8px 18px; font-size: 13px; }
+  .kv + .kv { border-top: 1px solid var(--border); }
+  .kv .k { color: var(--muted); } .kv .v { font-variant-numeric: tabular-nums; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tsunami<span class="dot">●</span> Tracker</h1>
+  <span class="sub" id="ver"></span>
+  <span class="live"><span class="pulse"></span><span id="upd">connecting…</span></span>
+</header>
+
+<div class="grid cards" id="cards"></div>
+
+<div class="grid cols">
+  <div class="panel">
+    <h2>Throughput</h2>
+    <div id="rates"></div>
+  </div>
+  <div class="panel">
+    <h2>Protocols</h2>
+    <div id="protos"></div>
+  </div>
+</div>
+
+<div class="grid cols" style="margin-top:14px">
+  <div class="panel">
+    <h2>Top torrents</h2>
+    <div id="torrents"></div>
+  </div>
+  <div class="panel">
+    <h2>Top clients</h2>
+    <div id="clients"></div>
+  </div>
+</div>
+
+<footer>Tsunami · <a href="/api/stats" style="color:var(--accent)">/api/stats</a> · <a href="/metrics" style="color:var(--accent)">/metrics</a></footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
+  if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n.toLocaleString();
+};
+const fmtB = n => {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n/1e9).toFixed(2)+' GB/s';
+  if (n >= 1e6) return (n/1e6).toFixed(2)+' MB/s';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+' KB/s';
+  return n+' B/s';
+};
+const up = s => {
+  s = Number(s)||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60;
+  return (d?d+'d ':'')+(h?h+'h ':'')+(m?m+'m ':'')+x+'s';
+};
+
+function card(label, value, cls) {
+  return `<div class="card"><div class="label">${label}</div><div class="value ${cls||''}">${value}</div></div>`;
+}
+
+async function tick() {
+  try {
+    const [st, tr] = await Promise.all([
+      fetch('/api/stats').then(r=>r.json()),
+      fetch('/api/torrents?limit=15').then(r=>r.json()),
+    ]);
+    const sw = st.swarm || {}, r = st.rates || {};
+    $('ver').textContent = 'v' + (st.version||'?') + ' · up ' + up(st.uptime_seconds);
+    $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
+
+    $('cards').innerHTML =
+      card('Peers','<span style="color:var(--green)">'+fmt(sw.peers)+'</span>') +
+      card('Seeders',fmt(sw.seeders),'green') +
+      card('Leechers',fmt(sw.leechers),'amber') +
+      card('Torrents',fmt(sw.torrents),'blue') +
+      card('Req / sec',fmt(r.requests_per_sec),'purple');
+
+    const row = (k,v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+    $('rates').innerHTML =
+      row('Requests / sec', fmt(r.requests_per_sec)) +
+      row('Bytes in / sec', fmtB(r.bytes_rx_per_sec)) +
+      row('Bytes out / sec', fmtB(r.bytes_tx_per_sec)) +
+      row('HTTP connections', fmt(st.http_connections)) +
+      row('Peers added (total)', fmt(sw.peers_added_total)) +
+      row('Peers removed (total)', fmt(sw.peers_removed_total));
+
+    const proto = (name,p) => p ? row(name,
+      `${fmt(p.requests)} req · ${fmt(p.announces)} ann · ${fmt(p.scrapes)} scr` +
+      (p.rate_limited?` · <span style="color:var(--red)">${fmt(p.rate_limited)} limited</span>`:'') +
+      (p.dropped?` · <span style="color:var(--amber)">${fmt(p.dropped)} dropped</span>`:'')
+    ) : '';
+    $('protos').innerHTML =
+      row('UDP IPv4', `${fmt((st.udp||{}).ipv4?.requests)} req`) +
+      proto('UDP IPv6',(st.udp||{}).ipv6) +
+      proto('HTTP',(st.http||{})) +
+      row('BEP-15 errors', fmt(((st.udp||{}).ipv4?.errors||0)+((st.udp||{}).ipv6?.errors||0)+(st.http?.errors||0)));
+
+    const ts = (tr.torrents||[]);
+    $('torrents').innerHTML = ts.length ? `<table><thead><tr>
+      <th>Info hash</th><th class="num">Seeders</th><th class="num">Leechers</th><th class="num">Peers</th>
+      </tr></thead><tbody>` + ts.map(t =>
+      `<tr><td class="hash">${(t.info_hash||'').slice(0,12)}…</td><td class="num">${fmt(t.seeders)}</td>` +
+      `<td class="num">${fmt(t.leechers)}</td><td class="num">${fmt(t.peers)}</td></tr>`).join('') +
+      `</tbody></table>` : '<div class="empty">No torrents</div>';
+
+    const cs = (st.top_clients||[]);
+    $('clients').innerHTML = cs.length ? `<table><thead><tr>
+      <th>Client</th><th class="num">Announces</th></tr></thead><tbody>` + cs.map(c =>
+      `<tr><td class="client">${c.client||'unknown'}</td><td class="num">${fmt(c.announces)}</td></tr>`).join('') +
+      `</tbody></table>` : '<div class="empty">No client data</div>';
+  } catch(e) {
+    $('upd').textContent = 'update failed — retrying';
+  }
+}
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>
