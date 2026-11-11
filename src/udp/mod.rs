@@ -399,6 +399,13 @@ impl Worker {
                     });
                     return;
                 }
+                if protocol::synthetic_peer_id(&req.peer_id) {
+                    self.local_mut(is_v4_sock).errors += 1;
+                    self.emit_simple(addr, is_v4_sock, move |b| {
+                        protocol::write_error_response(b, req.transaction_id, "invalid peer_id")
+                    });
+                    return;
+                }
                 if !self.rl.allow_announce() {
                     self.local_mut(is_v4_sock).rate_limited += 1;
                     return;
