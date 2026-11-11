@@ -65,6 +65,20 @@ full_scrape = false
 # ONLY set this when the proxy always overwrites the header, else clients
 # can spoof their IP. Applies to /announce, /scrape, /bep15 and WebSocket.
 proxy_ip_header = ""
+# Serve a self-contained HTML stats dashboard at `/` and `/dashboard`.
+dashboard = true
+
+# --- Admin/stats route protection ---
+# The public tracker endpoints (/announce, /scrape, /bep15, WebSocket) are
+# NEVER gated — peers must reach them. These only protect the operational
+# routes: /api/*, /metrics, /dashboard and /.
+# HTTP Basic-auth for admin routes. Empty user = no password required.
+#admin_user = "admin"
+#admin_password = "change-me"
+# Optional source-IP allowlist for admin routes: exact IPs or CIDRs.
+# Matching IPs bypass password auth entirely (for Prometheus/Grafana).
+# Empty = no IP bypass. Non-listed IPs get 401 (if user set) or 403.
+#admin_allowlist = ["10.0.0.0/8", "192.168.1.5", "fd00::/8"]
 
 [cleaning]
 # Seconds between peer-expiry passes

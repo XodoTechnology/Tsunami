@@ -1066,6 +1066,24 @@ impl Store {
         (t4 + t6, p4 + p6, s4 + s6, l4 + l6)
     }
 
+    /// Rough estimate of swarm-store heap bytes: dense peer slots + per-
+    /// torrent map/RwLock overhead + optional peer_id side table. Used for
+    /// capacity observability; not exact (excludes allocator slack).
+    pub fn memory_estimate_bytes(&self) -> u64 {
+        let (t4, p4, _, _) = self.v4.totals();
+        let (t6, p6, _, _) = self.v6.totals();
+        let mut bytes = p4 * std::mem::size_of::<Slot4>() as u64
+            + p6 * std::mem::size_of::<Slot6>() as u64;
+        // Per-torrent: InfoHash key + HashMap node + RwLock<Swarm> header.
+        let torrent_overhead = (std::mem::size_of::<InfoHash>() + 232) as u64;
+        bytes += (t4 + t6) * torrent_overhead;
+        if self.store_peer_id {
+            // peer_ids HashMap: key + 20B PeerId + control/alloc overhead.
+            bytes += (p4 + p6) * 96;
+        }
+        bytes
+    }
+
     pub fn for_each_torrent<F: FnMut(&InfoHash, u32, u32)>(&self, mut f: F) {
         self.v4.for_each_torrent(&mut f);
         self.v6.for_each_torrent(f);

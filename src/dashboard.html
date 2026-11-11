@@ -14,7 +14,7 @@
   body {
     background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    padding: 24px; max-width: 1200px; margin: 0 auto;
+    padding: 24px; max-width: 1240px; margin: 0 auto;
   }
   header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
   h1 { font-size: 22px; font-weight: 650; letter-spacing: .3px; }
@@ -34,6 +34,7 @@
   .card .value { font-size: 26px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .card .value.green { color: var(--green); } .card .value.amber { color: var(--amber); }
   .card .value.blue { color: var(--accent); } .card .value.purple { color: var(--purple); }
+  .card .value.red { color: var(--red); }
 
   .cols { grid-template-columns: 1fr 1fr; }
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
@@ -41,7 +42,9 @@
   .panel h2 {
     font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase;
     letter-spacing: .6px; padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display:flex; justify-content:space-between; align-items:center;
   }
+  .panel h2 .hint { font-weight:400; text-transform:none; letter-spacing:0; font-size:11px; color:var(--muted); }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 9px 18px; font-size: 13px; }
   th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
@@ -53,7 +56,18 @@
   .kv { display: flex; justify-content: space-between; padding: 8px 18px; font-size: 13px; }
   .kv + .kv { border-top: 1px solid var(--border); }
   .kv .k { color: var(--muted); } .kv .v { font-variant-numeric: tabular-nums; }
+  .kv .v .dim { color: var(--muted); font-size: 11px; }
+
+  /* charts */
+  .chart { padding: 10px 14px 14px; }
+  .chart + .chart { border-top: 1px solid var(--border); }
+  .chart .ctitle { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 2px 4px 6px; display:flex; justify-content:space-between;}
+  .legend { display:flex; gap:12px; font-size:11px; color:var(--muted); }
+  .legend span { display:inline-flex; align-items:center; gap:5px; }
+  .legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
+  svg text { font-family: inherit; }
   footer { margin-top: 20px; color: var(--muted); font-size: 12px; text-align: center; }
+  footer a { color: var(--accent); text-decoration: none; }
 </style>
 </head>
 <body>
@@ -67,7 +81,7 @@
 
 <div class="grid cols">
   <div class="panel">
-    <h2>Throughput</h2>
+    <h2>Throughput <span class="hint">req/s + B/s</span></h2>
     <div id="rates"></div>
   </div>
   <div class="panel">
@@ -76,10 +90,40 @@
   </div>
 </div>
 
+<div class="panel" style="margin-top:14px">
+  <h2>Activity <span class="hint">last 5 min · per-second</span></h2>
+  <div class="chart">
+    <div class="ctitle"><span>Requests / sec</span>
+      <span class="legend">
+        <span><i style="background:var(--accent)"></i>UDP v4</span>
+        <span><i style="background:var(--purple)"></i>UDP v6</span>
+        <span><i style="background:var(--green)"></i>HTTP</span>
+      </span></div>
+    <div id="g_req"></div>
+  </div>
+  <div class="chart">
+    <div class="ctitle"><span>Peers</span>
+      <span class="legend">
+        <span><i style="background:var(--green)"></i>Total</span>
+        <span><i style="background:var(--amber)"></i>Seeders</span>
+        <span><i style="background:var(--red)"></i>Leechers</span>
+      </span></div>
+    <div id="g_peers"></div>
+  </div>
+  <div class="chart">
+    <div class="ctitle"><span>Bandwidth</span>
+      <span class="legend">
+        <span><i style="background:var(--accent)"></i>In</span>
+        <span><i style="background:var(--amber)"></i>Out</span>
+      </span></div>
+    <div id="g_bytes"></div>
+  </div>
+</div>
+
 <div class="grid cols" style="margin-top:14px">
   <div class="panel">
-    <h2>Top torrents</h2>
-    <div id="torrents"></div>
+    <h2>System</h2>
+    <div id="system"></div>
   </div>
   <div class="panel">
     <h2>Top clients</h2>
@@ -87,7 +131,12 @@
   </div>
 </div>
 
-<footer>Tsunami · <a href="/api/stats" style="color:var(--accent)">/api/stats</a> · <a href="/metrics" style="color:var(--accent)">/metrics</a></footer>
+<div class="panel" style="margin-top:14px">
+  <h2>Top torrents</h2>
+  <div id="torrents"></div>
+</div>
+
+<footer>Tsunami · <a href="/api/stats">/api/stats</a> · <a href="/api/timeseries">/api/timeseries</a> · <a href="/metrics">/metrics</a></footer>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -98,12 +147,20 @@ const fmt = n => {
   if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
   return n.toLocaleString();
 };
+const fmtI = n => (Number(n)||0).toLocaleString();
 const fmtB = n => {
   n = Number(n) || 0;
   if (n >= 1e9) return (n/1e9).toFixed(2)+' GB/s';
   if (n >= 1e6) return (n/1e6).toFixed(2)+' MB/s';
   if (n >= 1e3) return (n/1e3).toFixed(1)+' KB/s';
   return n+' B/s';
+};
+const fmtBytes = n => {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n/1e9).toFixed(2)+' GB';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+' MB';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+' KB';
+  return n+' B';
 };
 const up = s => {
   s = Number(s)||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60;
@@ -113,14 +170,75 @@ const up = s => {
 function card(label, value, cls) {
   return `<div class="card"><div class="label">${label}</div><div class="value ${cls||''}">${value}</div></div>`;
 }
+const row = (k,v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+
+// ---- SVG multi-series line chart ----
+// series: [{label,color,points:[[t,y],...]}]  (t = seconds, y = value)
+function drawChart(elId, series, yFmt) {
+  const el = $(elId);
+  const W = 640, H = 96, PL = 46, PR = 8, PT = 8, PB = 16;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  // time range across all series
+  let t0 = Infinity, t1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  series.forEach(s => s.points.forEach(p => {
+    if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0];
+    if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+  }));
+  if (!isFinite(t0)) { el.innerHTML = '<div class="empty" style="padding:8px">no data yet</div>'; return; }
+  if (t1 - t0 < 1) t1 = t0 + 1;
+  if (y1 - y0 < 1e-9) { y0 = 0; y1 = Math.max(1, y0 + 1); }
+  // nice y padding
+  const padY = (y1 - y0) * 0.08; y0 -= padY; y1 += padY;
+  const X = t => PL + (t - t0) / (t1 - t0) * iw;
+  const Y = v => PT + ih - (v - y0) / (y1 - y0) * ih;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block">`;
+  // horizontal gridlines (3)
+  for (let i = 0; i <= 3; i++) {
+    const gy = PT + ih * i / 3, gv = y1 - (y1 - y0) * i / 3;
+    svg += `<line x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}" stroke="#232a38" stroke-width="1"/>`;
+    svg += `<text x="${PL-5}" y="${gy+3}" text-anchor="end" font-size="9" fill="#8b95a9">${yFmt(gv)}</text>`;
+  }
+  // x labels: start / mid / end. `t` is seconds-since-boot (uptime), so
+  // "ago" is relative to the newest sample (t1), not wall-clock.
+  const xt = [t0, (t0+t1)/2, t1];
+  xt.forEach(t => {
+    const ago = Math.max(0, Math.round(t1 - t));
+    const lbl = ago < 60 ? ago+'s' : ago < 3600 ? Math.round(ago/60)+'m' : Math.round(ago/3600)+'h';
+    svg += `<text x="${X(t)}" y="${H-4}" text-anchor="middle" font-size="9" fill="#8b95a9">-${lbl}</text>`;
+  });
+  // series polylines
+  series.forEach(s => {
+    if (s.points.length < 2) return;
+    const d = s.points.map(p => `${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' ');
+    svg += `<polyline points="${d}" fill="none" stroke="${s.color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+    // latest point dot
+    const lp = s.points[s.points.length-1];
+    svg += `<circle cx="${X(lp[0]).toFixed(1)}" cy="${Y(lp[1]).toFixed(1)}" r="2.4" fill="${s.color}"/>`;
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+}
+
+// build per-second rate series from cumulative counters
+function rateSeries(samples, get) {
+  const pts = [];
+  for (let i = 1; i < samples.length; i++) {
+    const a = samples[i-1], b = samples[i];
+    const dt = Math.max(1, b.t - a.t);
+    pts.push([b.t, Math.max(0, (get(b) - get(a)) / dt)]);
+  }
+  return pts;
+}
+const gaugeSeries = (samples, get) => samples.map(s => [s.t, get(s)]);
 
 async function tick() {
   try {
-    const [st, tr] = await Promise.all([
+    const [st, tr, ts] = await Promise.all([
       fetch('/api/stats').then(r=>r.json()),
       fetch('/api/torrents?limit=15').then(r=>r.json()),
+      fetch('/api/timeseries?seconds=300').then(r=>r.json()),
     ]);
-    const sw = st.swarm || {}, r = st.rates || {};
+    const sw = st.swarm || {}, r = st.rates || {}, sys = st.system || {};
     $('ver').textContent = 'v' + (st.version||'?') + ' · up ' + up(st.uptime_seconds);
     $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
 
@@ -129,32 +247,72 @@ async function tick() {
       card('Seeders',fmt(sw.seeders),'green') +
       card('Leechers',fmt(sw.leechers),'amber') +
       card('Torrents',fmt(sw.torrents),'blue') +
-      card('Req / sec',fmt(r.requests_per_sec),'purple');
+      card('Req / sec',fmt(r.requests_per_sec),'purple') +
+      card('Memory',fmtBytes(sys.rss_bytes),'red') +
+      card('CPU',(sys.cpu_percent||0).toFixed(0)+'%','blue');
 
-    const row = (k,v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+    const pr = r.udp_ipv4||{}, pr6 = r.udp_ipv6||{}, ph = r.http||{};
     $('rates').innerHTML =
       row('Requests / sec', fmt(r.requests_per_sec)) +
+      row('&nbsp;&nbsp;UDP IPv4', `<span class="dim">${fmt(pr.requests_per_sec)} req/s</span>`) +
+      row('&nbsp;&nbsp;UDP IPv6', `<span class="dim">${fmt(pr6.requests_per_sec)} req/s</span>`) +
+      row('&nbsp;&nbsp;HTTP/WS', `<span class="dim">${fmt(ph.requests_per_sec)} req/s</span>`) +
       row('Bytes in / sec', fmtB(r.bytes_rx_per_sec)) +
       row('Bytes out / sec', fmtB(r.bytes_tx_per_sec)) +
+      row('Peer joins / sec', fmt(r.peers_added_per_sec)) +
+      row('Peer leaves / sec', fmt(r.peers_removed_per_sec)) +
       row('HTTP connections', fmt(st.http_connections)) +
-      row('Peers added (total)', fmt(sw.peers_added_total)) +
-      row('Peers removed (total)', fmt(sw.peers_removed_total));
+      row('CQ overflows', fmt(st.cqe_overflow_total));
 
     const proto = (name,p) => p ? row(name,
       `${fmt(p.requests)} req · ${fmt(p.announces)} ann · ${fmt(p.scrapes)} scr` +
+      ` <span class="dim">[${fmt(p.ev_started||0)}▲ ${fmt(p.ev_completed||0)}● ${fmt(p.ev_stopped||0)}■]</span>` +
       (p.rate_limited?` · <span style="color:var(--red)">${fmt(p.rate_limited)} limited</span>`:'') +
       (p.dropped?` · <span style="color:var(--amber)">${fmt(p.dropped)} dropped</span>`:'')
     ) : '';
     $('protos').innerHTML =
-      row('UDP IPv4', `${fmt((st.udp||{}).ipv4?.requests)} req`) +
+      proto('UDP IPv4',(st.udp||{}).ipv4) +
       proto('UDP IPv6',(st.udp||{}).ipv6) +
-      proto('HTTP',(st.http||{})) +
+      proto('HTTP / WS',(st.http||{})) +
       row('BEP-15 errors', fmt(((st.udp||{}).ipv4?.errors||0)+((st.udp||{}).ipv6?.errors||0)+(st.http?.errors||0)));
 
-    const ts = (tr.torrents||[]);
-    $('torrents').innerHTML = ts.length ? `<table><thead><tr>
+    // ---- system panel ----
+    $('system').innerHTML =
+      row('RSS memory', fmtBytes(sys.rss_bytes)) +
+      row('Swarm estimate', fmtBytes(sys.swarm_estimate_bytes)) +
+      row('CPU', (sys.cpu_percent||0).toFixed(1)+'%') +
+      row('Uptime', up(st.uptime_seconds)) +
+      row('Torrents created', fmt(sw.torrents_created_total)) +
+      row('Peers added (total)', fmt(sw.peers_added_total)) +
+      row('Peers removed (total)', fmt(sw.peers_removed_total)) +
+      row('io_uring CQ overflows', fmt(st.cqe_overflow_total));
+
+    // ---- charts ----
+    const samples = (ts.samples||[]);
+    if (samples.length > 1) {
+      drawChart('g_req', [
+        {color:'#4f8cff', points: rateSeries(samples, s=>s.udp4_requests)},
+        {color:'#a06bff', points: rateSeries(samples, s=>s.udp6_requests)},
+        {color:'#3ecf8e',  points: rateSeries(samples, s=>s.http_requests)},
+      ], v=>fmt(v));
+      drawChart('g_peers', [
+        {color:'#3ecf8e',  points: gaugeSeries(samples, s=>s.peers)},
+        {color:'#f0b44c',  points: gaugeSeries(samples, s=>s.seeders)},
+        {color:'#ef6a6a',    points: gaugeSeries(samples, s=>s.leechers)},
+      ], v=>fmt(v));
+      // bandwidth: combine rx+tx per family into in/out
+      const inPts = rateSeries(samples, s=>s.bytes_rx), outPts = rateSeries(samples, s=>s.bytes_tx);
+      const toB = pts => pts.map(p=>[p[0], p[1]]);
+      drawChart('g_bytes', [
+        {color:'#4f8cff', points: toB(inPts)},
+        {color:'#f0b44c',  points: toB(outPts)},
+      ], v=>{ const n=v; return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n.toFixed(0); });
+    }
+
+    const tlist = (tr.torrents||[]);
+    $('torrents').innerHTML = tlist.length ? `<table><thead><tr>
       <th>Info hash</th><th class="num">Seeders</th><th class="num">Leechers</th><th class="num">Peers</th>
-      </tr></thead><tbody>` + ts.map(t =>
+      </tr></thead><tbody>` + tlist.map(t =>
       `<tr><td class="hash">${(t.info_hash||'').slice(0,12)}…</td><td class="num">${fmt(t.seeders)}</td>` +
       `<td class="num">${fmt(t.leechers)}</td><td class="num">${fmt(t.peers)}</td></tr>`).join('') +
       `</tbody></table>` : '<div class="empty">No torrents</div>';

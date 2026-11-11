@@ -49,13 +49,23 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
 - **Full scrape**: `GET /scrape` with no `info_hash` returns stats for every
   tracked torrent (BEP-12 format, same as opentracker's fullscrape). Enable
   with `http.full_scrape`. HTTP only — UDP scrape is per-hash-list by design.
+- **HTML dashboard** at `/` and `/dashboard` — self-contained stats page
+  (no CDN) with live cards, per-protocol breakdown, SVG time-series graphs
+  (requests/s, peers, bandwidth), system gauges, top torrents and clients.
+  Enable with `http.dashboard` (default on).
 - **Stats API** (JSON):
-  - `GET /api/stats` — totals, per-protocol counters, rates, top clients
+  - `GET /api/stats` — totals, per-protocol counters + rates, system gauges
+    (RSS/CPU/swarm-bytes), announce-event breakdown, top clients
+  - `GET /api/timeseries?seconds=` — per-second samples for graphing
   - `GET /api/torrents?limit=&offset=` — torrent list sorted by swarm size
   - `GET /api/torrent/{info_hash_hex}?limit=` — per-torrent detail + peers
   - `GET /api/clients?n=` — top clients by announce count (BEP 20 names)
-- **Prometheus metrics**: `GET /metrics` — counters, gauges, and rates in
-  Prometheus text format (Grafana/alerting ready).
+- **Prometheus metrics**: `GET /metrics` — counters, gauges, and per-protocol
+  rates in Prometheus text format (Grafana/alerting ready).
+- **Admin-route protection**: `/api/*`, `/metrics`, `/dashboard`, `/` can be
+  gated with HTTP Basic auth (`http.admin_user`/`admin_password`) and/or a
+  source-IP allowlist (`http.admin_allowlist`). Public tracker endpoints are
+  never gated. Off by default.
 - **Scrape export**: periodic `infohash seeders leechers` file (for mirrors).
 - **Access list**: allow/deny info hashes, reload on SIGHUP.
 - **Anti-amplification**: stateless HMAC connection IDs (BEP 15 style).
@@ -131,7 +141,8 @@ Sockets spread across `127/8` loopback aliases for many distinct peers.
 | `udp://host:port` | BEP 15 | announce/scrape/connect |
 | `/announce` | BEP 3 | GET, bencoded dict |
 | `/scrape` | BEP 12 | GET, repeated `info_hash` params; no params = full scrape (if enabled) |
-| `/api/stats` | JSON | website stats snapshot |
+| `/api/stats` | JSON | website stats snapshot (per-proto rates, system gauges) |
+| `/api/timeseries` | JSON | `?seconds=` per-second samples for graphs |
 | `/api/torrents` | JSON | `?limit=100&offset=0` |
 | `/api/torrent/{hex}` | JSON | `?limit=200` peers |
 | `/api/clients` | JSON | `?n=50` top clients |

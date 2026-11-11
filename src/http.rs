@@ -156,6 +156,10 @@ fn handle_conn(
     };
 
     let head = &buf[..header_end];
+    // The direct TCP peer is authoritative for admin allowlisting — the
+    // forwarded client IP (below) is for peer identity and could be spoofed
+    // if proxy_ip_header is misconfigured, so it must NOT gate admin access.
+    let conn_ip = peer.ip();
     // When a trusted proxy header is configured, the real client IP comes
     // from it rather than the TCP peer — applies to WebSocket, /bep15 and
     // every HTTP route uniformly.
@@ -226,6 +230,14 @@ fn handle_conn(
         };
     }
 
+    // Admin/stats routes may require auth or an IP allowlist. Public tracker
+    // endpoints (/announce, /scrape, /bep15, WebSocket) are never gated.
+    if is_admin_path(req.path) && admin_protected(&config.http) {
+        if let Some(code) = admin_gate(head, conn_ip, &config.http) {
+            return write_admin_denied(&mut stream, code);
+        }
+    }
+
     let (status, ctype, body) = route(
         &req, peer, config, store, stats, access_list, rng, scratch,
     );
@@ -268,15 +280,26 @@ fn route(
             200,
             "application/json",
             stats
-                .snapshot_json(store.totals(), store.torrents_created_total(), VERSION)
+                .snapshot_json(
+                    store.totals(),
+                    store.torrents_created_total(),
+                    store.memory_estimate_bytes(),
+                    VERSION,
+                )
                 .to_string()
                 .into_bytes(),
         ),
+        "/api/timeseries" => api_timeseries(req.query, stats),
         "/metrics" => (
             200,
             "text/plain; version=0.0.4",
             stats
-                .prometheus_text(store.totals(), store.torrents_created_total(), VERSION)
+                .prometheus_text(
+                    store.totals(),
+                    store.torrents_created_total(),
+                    store.memory_estimate_bytes(),
+                    VERSION,
+                )
                 .into_bytes(),
         ),
         "/api/torrents" => api_torrents(req.query, store),
@@ -353,6 +376,181 @@ fn content_length(head: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+// ---------------- admin auth ----------------
+
+/// Paths that expose operational data and may be gated.
+fn is_admin_path(path: &str) -> bool {
+    path == "/" || path == "/dashboard" || path == "/metrics" || path.starts_with("/api/")
+}
+
+/// Whether any admin protection is configured (user or allowlist).
+fn admin_protected(cfg: &crate::config::HttpConfig) -> bool {
+    !cfg.admin_user.is_empty() || !cfg.admin_allowlist.is_empty()
+}
+
+/// Returns None when the request may proceed, or Some(status) to reject.
+/// Allowlisted IPs bypass password auth; other clients need valid Basic
+/// credentials when `admin_user` is set. With only an allowlist configured,
+/// non-listed IPs get 403.
+fn admin_gate(head: &[u8], ip: IpAddr, cfg: &crate::config::HttpConfig) -> Option<u16> {
+    if ip_in_allowlist(ip, &cfg.admin_allowlist) {
+        return None;
+    }
+    if !cfg.admin_user.is_empty() {
+        return if basic_auth_ok(head, cfg) { None } else { Some(401) };
+    }
+    if cfg.admin_allowlist.is_empty() {
+        None
+    } else {
+        Some(403)
+    }
+}
+
+fn ip_in_allowlist(ip: IpAddr, list: &[String]) -> bool {
+    list.iter().any(|e| cidr_match(e.trim(), ip))
+}
+
+/// Match an IP against "addr", "addr/prefix" (IPv4 /0-32, IPv6 /0-128).
+fn cidr_match(entry: &str, ip: IpAddr) -> bool {
+    let (addr_s, prefix) = match entry.split_once('/') {
+        Some((a, p)) => match p.parse::<u32>() {
+            Ok(n) => (a, Some(n)),
+            Err(_) => return false,
+        },
+        None => (entry, None),
+    };
+    let Ok(net) = addr_s.parse::<IpAddr>() else {
+        return false;
+    };
+    match (net, ip) {
+        (IpAddr::V4(n), IpAddr::V4(i)) => {
+            let p = prefix.unwrap_or(32);
+            if p > 32 {
+                return false;
+            }
+            let mask = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+            (u32::from(n) & mask) == (u32::from(i) & mask)
+        }
+        (IpAddr::V6(n), IpAddr::V6(i)) => {
+            let p = prefix.unwrap_or(128);
+            if p > 128 {
+                return false;
+            }
+            v6_prefix_eq(&n.octets(), &i.octets(), p as usize)
+        }
+        _ => false,
+    }
+}
+
+fn v6_prefix_eq(a: &[u8; 16], b: &[u8; 16], bits: usize) -> bool {
+    let full = bits / 8;
+    if a[..full] != b[..full] {
+        return false;
+    }
+    let rem = bits % 8;
+    if rem == 0 {
+        return true;
+    }
+    let mask = 0xFFu8 << (8 - rem);
+    (a[full] & mask) == (b[full] & mask)
+}
+
+/// Validate an `Authorization: Basic base64(user:pass)` header against the
+/// configured admin credentials (constant-time compare).
+fn basic_auth_ok(head: &[u8], cfg: &crate::config::HttpConfig) -> bool {
+    let Ok(text) = std::str::from_utf8(head) else {
+        return false;
+    };
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        if !k.trim().eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+        let v = v.trim();
+        let mut parts = v.splitn(2, ' ');
+        let (scheme, token) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        if !scheme.eq_ignore_ascii_case("basic") || token.is_empty() {
+            continue;
+        }
+        let Some(decoded) = b64_decode(token.as_bytes()) else {
+            return false;
+        };
+        let Ok(creds) = std::str::from_utf8(&decoded) else {
+            return false;
+        };
+        let Some((user, pass)) = creds.split_once(':') else {
+            return false;
+        };
+        return constant_time_eq::constant_time_eq(user.as_bytes(), cfg.admin_user.as_bytes())
+            && constant_time_eq::constant_time_eq(pass.as_bytes(), cfg.admin_password.as_bytes());
+    }
+    false
+}
+
+/// Minimal standard-alphabet base64 decoder (handles padding + whitespace).
+/// Returns None on malformed input.
+fn b64_decode(input: &[u8]) -> Option<Vec<u8>> {
+    fn val(b: u8) -> Option<u32> {
+        match b {
+            b'A'..=b'Z' => Some((b - b'A') as u32),
+            b'a'..=b'z' => Some((b - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((b - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut sextets: Vec<u32> = Vec::with_capacity(input.len());
+    for &b in input {
+        match b {
+            b'=' => break, // padding terminates the data
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            _ => sextets.push(val(b)?),
+        }
+    }
+    let mut out = Vec::with_capacity(sextets.len() * 3 / 4);
+    for chunk in sextets.chunks(4) {
+        let n = chunk.len();
+        if n < 2 {
+            return None; // a lone sextet can't encode a byte
+        }
+        let triple = (chunk[0] << 18)
+            | (chunk[1] << 12)
+            | (if n > 2 { chunk[2] } else { 0 } << 6)
+            | if n > 3 { chunk[3] } else { 0 };
+        out.push((triple >> 16) as u8);
+        if n > 2 {
+            out.push((triple >> 8) as u8);
+        }
+        if n > 3 {
+            out.push(triple as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Write a 401 (with WWW-Authenticate) or 403 rejection for admin routes.
+fn write_admin_denied(stream: &mut TcpStream, code: u16) -> anyhow::Result<()> {
+    let (reason, body, extra) = match code {
+        401 => (
+            "Unauthorized",
+            &b"authentication required"[..],
+            "WWW-Authenticate: Basic realm=\"tsunami\"\r\n",
+        ),
+        _ => ("Forbidden", &b"forbidden"[..], ""),
+    };
+    let head = format!(
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    Ok(())
 }
 
 fn parse_head(head: &[u8]) -> Option<Request<'_>> {
@@ -505,6 +703,18 @@ fn announce_http(
         .unwrap_or(0);
 
     stats.http.announces.fetch_add(1, Ordering::Relaxed);
+    match event {
+        SwarmEvent::Started => {
+            stats.http.ev_started.fetch_add(1, Ordering::Relaxed);
+        }
+        SwarmEvent::Completed => {
+            stats.http.ev_completed.fetch_add(1, Ordering::Relaxed);
+        }
+        SwarmEvent::Stopped => {
+            stats.http.ev_stopped.fetch_add(1, Ordering::Relaxed);
+        }
+        SwarmEvent::None => {}
+    }
     if store.store_peer_id {
         stats.client_stats.record(&peer_id);
     }
@@ -720,6 +930,17 @@ fn api_clients(query: &str, stats: &Arc<Stats>) -> Response {
         })
         .collect();
     (200, "application/json", serde_json::json!({ "clients": clients }).to_string().into_bytes())
+}
+
+/// GET /api/timeseries?seconds=N — per-second samples for dashboard graphs.
+fn api_timeseries(query: &str, stats: &Arc<Stats>) -> Response {
+    let params: QueryParams = parse_query(query).into();
+    let seconds = params.get_i64(b"seconds").unwrap_or(300).clamp(10, 3600) as u64;
+    (
+        200,
+        "application/json",
+        stats.timeseries_json(seconds).to_string().into_bytes(),
+    )
 }
 
 fn write_response(

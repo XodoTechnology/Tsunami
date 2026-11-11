@@ -99,6 +99,19 @@ pub struct HttpConfig {
     /// Serve a self-contained HTML stats dashboard at `/` and `/dashboard`.
     /// It only exposes the same data as the public JSON APIs.
     pub dashboard: bool,
+    /// HTTP Basic-auth username for admin/stats routes (`/api/*`, `/metrics`,
+    /// `/dashboard`, `/`). Leave empty to disable password auth. The public
+    /// tracker endpoints (`/announce`, `/scrape`, `/bep15`, WebSocket) are
+    /// never gated — peers must reach them.
+    pub admin_user: String,
+    /// HTTP Basic-auth password for admin routes. Store the config file
+    /// securely — this is plaintext.
+    pub admin_password: String,
+    /// Optional source-IP allowlist for admin routes: exact IPs or CIDRs
+    /// (e.g. "10.0.0.0/8", "192.168.1.5", "fd00::/8"). Matching IPs bypass
+    /// password auth entirely (for Prometheus/Grafana/monitoring). Empty =
+    /// no IP-based bypass.
+    pub admin_allowlist: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -231,6 +244,9 @@ impl Default for HttpConfig {
             full_scrape: false,
             proxy_ip_header: String::new(),
             dashboard: true,
+            admin_user: String::new(),
+            admin_password: String::new(),
+            admin_allowlist: Vec::new(),
         }
     }
 }

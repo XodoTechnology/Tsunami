@@ -41,7 +41,6 @@ fn main() -> anyhow::Result<()> {
     log::info!("tsunami v{VERSION} starting");
 
     let stats = Stats::new();
-    spawn_rate_sampler(&stats);
     let shards = config.network.swarm_shards.max(1).next_power_of_two();
     let store = Arc::new(Store::new(
         shards,
@@ -50,6 +49,7 @@ fn main() -> anyhow::Result<()> {
         config.protocol.max_peer_age,
         config.protocol.max_response_peers,
     ));
+    spawn_rate_sampler(&stats, &store);
 
     // Restore peer state from a previous snapshot (if enabled + file exists).
     // Done before workers bind so restored peers are live immediately.
@@ -222,15 +222,44 @@ fn write_scrape_export(store: &Store, path: &std::path::Path) -> anyhow::Result<
     Ok(())
 }
 
-/// Feeds the stats rate ring once per second so windowed rates are
-/// independent of who/when stats endpoints are polled.
-fn spawn_rate_sampler(stats: &Arc<Stats>) {
+/// Feeds the stats rate ring once per second so windowed rates, the
+/// dashboard time series, and system gauges are independent of who/when
+/// stats endpoints are polled.
+fn spawn_rate_sampler(stats: &Arc<Stats>, store: &Arc<Store>) {
     let stats = stats.clone();
+    let store = store.clone();
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get() as u64)
+        .unwrap_or(1)
+        .max(1);
+    let ticks = tsunami::stats::clock_ticks();
+    let mut prev_jiffies = tsunami::stats::read_cpu_jiffies();
+    let mut prev_instant = std::time::Instant::now();
     std::thread::Builder::new()
         .name("rate-sampler".into())
         .spawn(move || loop {
             std::thread::sleep(Duration::from_millis(tsunami::stats::RATE_SAMPLE_MS));
-            stats.push_rate_sample();
+            // CPU% = process jiffies consumed / (wall jiffies * cores), as
+            // percent*10. Measures fraction of total machine capacity used.
+            let now = std::time::Instant::now();
+            let jiffies = tsunami::stats::read_cpu_jiffies();
+            let elapsed = now.duration_since(prev_instant).as_secs_f64().max(0.001);
+            let cpu_secs = jiffies.saturating_sub(prev_jiffies) as f64 / ticks as f64;
+            let cpu_percent_x10 =
+                (cpu_secs / (elapsed * num_cpus as f64) * 1000.0).min(1000.0) as u64;
+            prev_jiffies = jiffies;
+            prev_instant = now;
+
+            let (torrents, peers, seeders, leechers) = store.totals();
+            let gauges = tsunami::stats::GaugeInput {
+                torrents,
+                peers,
+                seeders,
+                leechers,
+                rss_bytes: tsunami::stats::read_rss_bytes(),
+                cpu_percent_x10,
+            };
+            stats.push_rate_sample(&gauges);
         })
         .expect("spawn rate sampler");
 }
@@ -247,7 +276,12 @@ fn spawn_maintenance(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {
                 std::thread::sleep(interval);
                 let totals = store.totals();
                 let created = store.torrents_created_total();
-                let snap = stats.snapshot_json(totals, created, VERSION);
+                let snap = stats.snapshot_json(
+                    totals,
+                    created,
+                    store.memory_estimate_bytes(),
+                    VERSION,
+                );
                 let s = to_json_string(&snap);
                 // one-line summary for logs
                 log::info!(

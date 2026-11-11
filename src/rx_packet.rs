@@ -641,10 +641,22 @@ pub fn process_packet(
                     return;
                 }
                 local.announces.fetch_add(1, Ordering::Relaxed);
+                let event = swarm::AnnounceEvent::from_wire(req.event as i32);
+                match event {
+                    swarm::AnnounceEvent::Started => {
+                        local.ev_started.fetch_add(1, Ordering::Relaxed);
+                    }
+                    swarm::AnnounceEvent::Completed => {
+                        local.ev_completed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    swarm::AnnounceEvent::Stopped => {
+                        local.ev_stopped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    swarm::AnnounceEvent::None => {}
+                }
                 if config.protocol.client_stats {
                     stats.client_stats.record(&req.peer_id);
                 }
-                let event = swarm::AnnounceEvent::from_wire(req.event as i32);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as u32)

@@ -192,6 +192,35 @@ real-IP fix below, every peer will appear as the proxy's IP. See
 One request per connection; send `Connection: close` or let the client
 re-open — there's no keep-alive pipelining on this endpoint.
 
+## Securing the stats/admin endpoints
+
+The public tracker endpoints (`/announce`, `/scrape`, `/bep15`, WebSocket)
+must stay reachable by peers — they are **never** gated. But the operational
+routes — `/api/*`, `/metrics`, `/dashboard`, `/` — expose peer IPs, client
+fingerprints and internals, so on a public IP you should protect them.
+
+Two independent knobs under `[http]`:
+
+```toml
+admin_user     = "admin"                  # Basic-auth user (empty = no password)
+admin_password = "change-me"              # plaintext — protect the config file
+admin_allowlist = ["10.0.0.0/8", "192.168.1.5"]  # IPs/CIDRs that bypass auth
+```
+
+- **`admin_user`/`admin_password`** → HTTP Basic auth on all admin routes.
+  Browsers prompt once and cache it; Prometheus uses `basic_auth` in the
+  scrape config.
+- **`admin_allowlist`** → matching source IPs/CIDRs skip password auth
+  entirely — use it for your Prometheus/Grafana/monitoring hosts and office
+  IPs so they don't need credentials.
+- With **only** an allowlist (no user), non-listed IPs get `403`; with a
+  user set they get `401` + `WWW-Authenticate`.
+- Both empty → admin routes are open (fine on a private/internal bind).
+
+If you terminate TLS at a reverse proxy, you can also just don't expose
+`18081`-style ports publicly and let the proxy inject auth — Tsunami's own
+gate is the simpler option when the port is directly reachable.
+
 ## Client IPs behind a proxy (`http.proxy_ip_header`)
 
 When Tsunami sits behind a reverse proxy / TLS terminator / load balancer,

@@ -294,6 +294,18 @@ pub(crate) fn dispatch(
             // remote port so the peer key stays unique per connection.
             let port = if req.port == 0 { peer.port() } else { req.port };
             let event = swarm::AnnounceEvent::from_wire(req.event as i32);
+            match event {
+                swarm::AnnounceEvent::Started => {
+                    stats.http.ev_started.fetch_add(1, Ordering::Relaxed);
+                }
+                swarm::AnnounceEvent::Completed => {
+                    stats.http.ev_completed.fetch_add(1, Ordering::Relaxed);
+                }
+                swarm::AnnounceEvent::Stopped => {
+                    stats.http.ev_stopped.fetch_add(1, Ordering::Relaxed);
+                }
+                swarm::AnnounceEvent::None => {}
+            }
             let now = unix_now();
             // Optional client-supplied IP becomes the swarm address only when
             // allow_client_ip is on; `ip` stays authoritative for conn_id.

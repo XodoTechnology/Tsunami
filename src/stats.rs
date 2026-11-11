@@ -1,7 +1,8 @@
 //! Global statistics: atomics updated by workers, JSON snapshot for the
-//! HTTP stats API and optional file export.
+//! HTTP stats API, Prometheus exposition, and a per-second time series
+//! feeding both windowed rates and the dashboard graphs.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -15,8 +16,13 @@ pub struct ProtoStats {
     pub errors: AtomicU64,
     pub bytes_rx: AtomicU64,
     pub bytes_tx: AtomicU64,
-    pub dropped: AtomicU64,   // responses dropped (no send buffer)
+    pub dropped: AtomicU64,      // responses dropped (no send buffer)
     pub rate_limited: AtomicU64, // requests shed by the rate limiter
+    // Announce lifecycle events (BEP-15/3 `event` field). Regular announces
+    // (event=None) are `announces - (started+completed+stopped)`.
+    pub ev_started: AtomicU64,
+    pub ev_completed: AtomicU64,
+    pub ev_stopped: AtomicU64,
 }
 
 impl ProtoStats {
@@ -40,6 +46,12 @@ impl ProtoStats {
             .fetch_add(other.dropped.load(Ordering::Relaxed), Ordering::Relaxed);
         self.rate_limited
             .fetch_add(other.rate_limited.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.ev_started
+            .fetch_add(other.ev_started.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.ev_completed
+            .fetch_add(other.ev_completed.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.ev_stopped
+            .fetch_add(other.ev_stopped.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 }
 
@@ -50,13 +62,15 @@ const CLIENT_STRIPES: usize = 64;
 pub type ClientKey = [u8; 8];
 
 pub struct ClientStats {
-    stripes: Vec<Mutex<HashMap<ClientKey, u64>>>,
+    stripes: Vec<Mutex<std::collections::HashMap<ClientKey, u64>>>,
 }
 
 impl ClientStats {
     pub fn new() -> Self {
         Self {
-            stripes: (0..CLIENT_STRIPES).map(|_| Mutex::new(HashMap::new())).collect(),
+            stripes: (0..CLIENT_STRIPES)
+                .map(|_| Mutex::new(std::collections::HashMap::new()))
+                .collect(),
         }
     }
 
@@ -84,6 +98,62 @@ impl ClientStats {
     }
 }
 
+/// Gauge values gathered by the sampler thread each tick (swarm totals come
+/// from the store; system values from /proc). Passed into push_rate_sample.
+#[derive(Clone, Copy, Default)]
+pub struct GaugeInput {
+    pub torrents: u64,
+    pub peers: u64,
+    pub seeders: u64,
+    pub leechers: u64,
+    pub rss_bytes: u64,
+    /// CPU utilisation in percent * 10 (one decimal) since last sample.
+    pub cpu_percent_x10: u64,
+}
+
+/// One point-in-time reading recorded once per second. Holds cumulative
+/// protocol counters plus instantaneous gauges so a single ring serves both
+/// windowed rates and the dashboard time series.
+#[derive(Clone, Copy, Default)]
+pub struct RateSample {
+    pub ts_ms: u64,
+    // Combined cumulative counters.
+    pub requests: u64,
+    pub bytes_rx: u64,
+    pub bytes_tx: u64,
+    // Per-protocol cumulative counters.
+    pub udp4_requests: u64,
+    pub udp6_requests: u64,
+    pub http_requests: u64,
+    pub udp4_bytes_rx: u64,
+    pub udp6_bytes_rx: u64,
+    pub http_bytes_rx: u64,
+    pub udp4_bytes_tx: u64,
+    pub udp6_bytes_tx: u64,
+    pub http_bytes_tx: u64,
+    // Swarm gauges (instantaneous).
+    pub torrents: u64,
+    pub peers: u64,
+    pub seeders: u64,
+    pub leechers: u64,
+    // Cumulative churn counters.
+    pub peers_added: u64,
+    pub peers_removed: u64,
+    // System gauges.
+    pub rss_bytes: u64,
+    pub cpu_percent_x10: u64,
+}
+
+/// How often the sampler thread records a point (drives ring density).
+pub const RATE_SAMPLE_MS: u64 = 1_000;
+/// How long the ring retains samples. 1h at 1s resolution is ~3600 points —
+/// plenty for live graphs; long-term trending is what Prometheus is for.
+const RATE_RING_MS: u64 = 3_600_000;
+/// Hard cap on retained samples (guards against clock weirdness).
+const RATE_RING_MAX: usize = 4096;
+/// Trailing window over which per-second rates are computed.
+const RATE_WINDOW_MS: u64 = 10_000;
+
 pub struct Stats {
     pub started: Instant,
     pub udp_ipv4: ProtoStats,
@@ -97,29 +167,36 @@ pub struct Stats {
     /// io_uring completions dropped due to CQ-ring overflow (UDP backend).
     /// Each drop can leak a provided-buffer id; the worker rebuilds the ring.
     pub cqe_overflow: AtomicU64,
+    /// Latest system gauges (updated by the sampler thread).
+    pub rss_bytes: AtomicU64,
+    pub cpu_percent_x10: AtomicU64,
     pub client_stats: ClientStats,
-    /// Ring of per-second cumulative-counter samples feeding windowed rates.
-    /// Fed by a dedicated sampler thread so every consumer (/api/stats,
-    /// /metrics, the maintenance log) sees the SAME window regardless of
-    /// poll timing.
+    /// Ring of per-second samples feeding windowed rates and /api/timeseries.
+    /// Fed by a dedicated sampler thread so every consumer sees the SAME
+    /// window regardless of poll timing.
     rate_samples: Mutex<VecDeque<RateSample>>,
 }
 
-/// One point-in-time cumulative-counter reading (milliseconds since start).
-#[derive(Clone, Copy)]
-struct RateSample {
-    ts_ms: u64,
-    requests: u64,
-    bytes_rx: u64,
-    bytes_tx: u64,
+/// Per-protocol rate triple.
+#[derive(Clone, Copy, Default)]
+pub struct ProtoRate {
+    pub requests_per_sec: u64,
+    pub bytes_rx_per_sec: u64,
+    pub bytes_tx_per_sec: u64,
 }
 
-/// How often the sampler thread records a point (drives ring density).
-pub const RATE_SAMPLE_MS: u64 = 1_000;
-/// How long the ring retains samples.
-const RATE_RING_MS: u64 = 120_000;
-/// Trailing window over which per-second rates are computed.
-const RATE_WINDOW_MS: u64 = 10_000;
+/// Windowed rates over a fixed trailing window, combined + per-protocol.
+#[derive(Clone, Copy, Default)]
+pub struct Rates {
+    pub requests_per_sec: u64,
+    pub bytes_rx_per_sec: u64,
+    pub bytes_tx_per_sec: u64,
+    pub udp4: ProtoRate,
+    pub udp6: ProtoRate,
+    pub http: ProtoRate,
+    pub peers_added_per_sec: u64,
+    pub peers_removed_per_sec: u64,
+}
 
 impl Stats {
     pub fn new() -> Arc<Self> {
@@ -132,6 +209,8 @@ impl Stats {
             peers_removed: AtomicU64::new(0),
             http_connections: AtomicU64::new(0),
             cqe_overflow: AtomicU64::new(0),
+            rss_bytes: AtomicU64::new(0),
+            cpu_percent_x10: AtomicU64::new(0),
             client_stats: ClientStats::new(),
             rate_samples: Mutex::new(VecDeque::with_capacity(
                 (RATE_RING_MS / RATE_SAMPLE_MS) as usize + 2,
@@ -139,22 +218,42 @@ impl Stats {
         })
     }
 
-    /// Record the current cumulative counters into the rate ring. Called by
-    /// the sampler thread once per RATE_SAMPLE_MS; also safe to call more
-    /// often (it just adds denser samples).
-    pub fn push_rate_sample(&self) {
+    /// Record the current cumulative counters + gauges into the rate ring.
+    /// Called by the sampler thread once per RATE_SAMPLE_MS.
+    pub fn push_rate_sample(&self, gauges: &GaugeInput) {
+        self.rss_bytes.store(gauges.rss_bytes, Ordering::Relaxed);
+        self.cpu_percent_x10
+            .store(gauges.cpu_percent_x10, Ordering::Relaxed);
+
         let ts_ms = self.started.elapsed().as_millis() as u64;
         let sample = RateSample {
             ts_ms,
             requests: self.total_requests(),
             bytes_rx: self.total_bytes_rx(),
             bytes_tx: self.total_bytes_tx(),
+            udp4_requests: self.udp_ipv4.requests.load(Ordering::Relaxed),
+            udp6_requests: self.udp_ipv6.requests.load(Ordering::Relaxed),
+            http_requests: self.http.requests.load(Ordering::Relaxed),
+            udp4_bytes_rx: self.udp_ipv4.bytes_rx.load(Ordering::Relaxed),
+            udp6_bytes_rx: self.udp_ipv6.bytes_rx.load(Ordering::Relaxed),
+            http_bytes_rx: self.http.bytes_rx.load(Ordering::Relaxed),
+            udp4_bytes_tx: self.udp_ipv4.bytes_tx.load(Ordering::Relaxed),
+            udp6_bytes_tx: self.udp_ipv6.bytes_tx.load(Ordering::Relaxed),
+            http_bytes_tx: self.http.bytes_tx.load(Ordering::Relaxed),
+            torrents: gauges.torrents,
+            peers: gauges.peers,
+            seeders: gauges.seeders,
+            leechers: gauges.leechers,
+            peers_added: self.peers_added.load(Ordering::Relaxed),
+            peers_removed: self.peers_removed.load(Ordering::Relaxed),
+            rss_bytes: gauges.rss_bytes,
+            cpu_percent_x10: gauges.cpu_percent_x10,
         };
         let mut q = self.rate_samples.lock().unwrap();
         q.push_back(sample);
         // Evict samples older than the ring horizon (and enforce a hard cap).
         while let Some(&front) = q.front() {
-            if ts_ms.saturating_sub(front.ts_ms) > RATE_RING_MS || q.len() > 256 {
+            if ts_ms.saturating_sub(front.ts_ms) > RATE_RING_MS || q.len() > RATE_RING_MAX {
                 q.pop_front();
             } else {
                 break;
@@ -162,17 +261,93 @@ impl Stats {
         }
     }
 
+    /// Borrow the rate ring for timeseries export. Caller holds the lock only
+    /// for the duration of the copy.
+    pub fn with_samples<R>(&self, f: impl FnOnce(&VecDeque<RateSample>) -> R) -> R {
+        let q = self.rate_samples.lock().unwrap();
+        f(&q)
+    }
+
+    /// Windowed rates over a fixed trailing window (requests, rx B/s, tx B/s
+    /// — combined and per-protocol, plus peer churn). Read-only: the rate is
+    /// (now - sample@window-ago) / window, so every consumer sees the same
+    /// value regardless of poll order.
+    fn compute_rates(&self) -> Rates {
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let q = self.rate_samples.lock().unwrap();
+        // Newest sample at or before the window start is the rate baseline.
+        let target = now_ms.saturating_sub(RATE_WINDOW_MS);
+        let base = q
+            .iter()
+            .rev()
+            .find(|s| s.ts_ms <= target)
+            .or_else(|| q.front())
+            .copied();
+
+        let dt_ms = match base {
+            Some(b) => now_ms.saturating_sub(b.ts_ms).max(1),
+            // No samples yet (first second after boot): rate since start.
+            None => now_ms.max(1),
+        };
+        let dt = dt_ms as f64 / 1000.0;
+        let per = |now: u64, then: u64| -> u64 {
+            ((now.saturating_sub(then)) as f64 / dt) as u64
+        };
+
+        let (b_req, b_rx, b_tx, b_padd, b_prem) = match base {
+            Some(b) => (b.requests, b.bytes_rx, b.bytes_tx, b.peers_added, b.peers_removed),
+            None => (0, 0, 0, 0, 0),
+        };
+        let (u4r, u6r, hr) = match base {
+            Some(b) => (b.udp4_requests, b.udp6_requests, b.http_requests),
+            None => (0, 0, 0),
+        };
+        let (u4rx, u6rx, hrx) = match base {
+            Some(b) => (b.udp4_bytes_rx, b.udp6_bytes_rx, b.http_bytes_rx),
+            None => (0, 0, 0),
+        };
+        let (u4tx, u6tx, htx) = match base {
+            Some(b) => (b.udp4_bytes_tx, b.udp6_bytes_tx, b.http_bytes_tx),
+            None => (0, 0, 0),
+        };
+
+        Rates {
+            requests_per_sec: per(self.total_requests(), b_req),
+            bytes_rx_per_sec: per(self.total_bytes_rx(), b_rx),
+            bytes_tx_per_sec: per(self.total_bytes_tx(), b_tx),
+            udp4: ProtoRate {
+                requests_per_sec: per(self.udp_ipv4.requests.load(Ordering::Relaxed), u4r),
+                bytes_rx_per_sec: per(self.udp_ipv4.bytes_rx.load(Ordering::Relaxed), u4rx),
+                bytes_tx_per_sec: per(self.udp_ipv4.bytes_tx.load(Ordering::Relaxed), u4tx),
+            },
+            udp6: ProtoRate {
+                requests_per_sec: per(self.udp_ipv6.requests.load(Ordering::Relaxed), u6r),
+                bytes_rx_per_sec: per(self.udp_ipv6.bytes_rx.load(Ordering::Relaxed), u6rx),
+                bytes_tx_per_sec: per(self.udp_ipv6.bytes_tx.load(Ordering::Relaxed), u6tx),
+            },
+            http: ProtoRate {
+                requests_per_sec: per(self.http.requests.load(Ordering::Relaxed), hr),
+                bytes_rx_per_sec: per(self.http.bytes_rx.load(Ordering::Relaxed), hrx),
+                bytes_tx_per_sec: per(self.http.bytes_tx.load(Ordering::Relaxed), htx),
+            },
+            peers_added_per_sec: per(self.peers_added.load(Ordering::Relaxed), b_padd),
+            peers_removed_per_sec: per(self.peers_removed.load(Ordering::Relaxed), b_prem),
+        }
+    }
+
     /// JSON-serializable snapshot for /api/stats.
-    /// `torrents_created` is the store's cumulative counter.
+    /// `store_totals` = (torrents, peers, seeders, leechers);
+    /// `swarm_bytes` = estimated swarm-store memory.
     pub fn snapshot_json(
         &self,
         store_totals: (u64, u64, u64, u64),
         torrents_created: u64,
+        swarm_bytes: u64,
         version: &str,
     ) -> serde_json::Value {
         let uptime = self.started.elapsed().as_secs();
         let (torrents, peers, seeders, leechers) = store_totals;
-        let (req_rate, rx_rate, tx_rate) = self.compute_rates();
+        let rates = self.compute_rates();
 
         let clients = self.client_stats.top(20);
         let client_list: Vec<serde_json::Value> = clients
@@ -187,9 +362,14 @@ impl Stats {
             "version": version,
             "uptime_seconds": uptime,
             "rates": {
-                "requests_per_sec": req_rate,
-                "bytes_rx_per_sec": rx_rate,
-                "bytes_tx_per_sec": tx_rate,
+                "requests_per_sec": rates.requests_per_sec,
+                "bytes_rx_per_sec": rates.bytes_rx_per_sec,
+                "bytes_tx_per_sec": rates.bytes_tx_per_sec,
+                "peers_added_per_sec": rates.peers_added_per_sec,
+                "peers_removed_per_sec": rates.peers_removed_per_sec,
+                "udp_ipv4": proto_rate_json(&rates.udp4),
+                "udp_ipv6": proto_rate_json(&rates.udp6),
+                "http": proto_rate_json(&rates.http),
             },
             "udp": {
                 "ipv4": proto_json(&self.udp_ipv4),
@@ -205,60 +385,69 @@ impl Stats {
                 "peers_removed_total": self.peers_removed.load(Ordering::Relaxed),
                 "torrents_created_total": torrents_created,
             },
+            "system": {
+                "rss_bytes": self.rss_bytes.load(Ordering::Relaxed),
+                "cpu_percent": self.cpu_percent_x10.load(Ordering::Relaxed) as f64 / 10.0,
+                "swarm_estimate_bytes": swarm_bytes,
+            },
             "http_connections": self.http_connections.load(Ordering::Relaxed),
             "cqe_overflow_total": self.cqe_overflow.load(Ordering::Relaxed),
             "top_clients": client_list,
         })
     }
 
-    /// Per-second rates over a fixed trailing window (requests, rx B/s,
-    /// tx B/s). Read-only: the rate is (now - sample@window-ago) / window,
-    /// so every consumer sees the same value regardless of poll order.
-    fn compute_rates(&self) -> (u64, u64, u64) {
+    /// Time series for /api/timeseries. `seconds` = lookback window;
+    /// samples are the 1s ring points within it (most recent last).
+    pub fn timeseries_json(&self, seconds: u64) -> serde_json::Value {
         let now_ms = self.started.elapsed().as_millis() as u64;
-        let cur_req = self.total_requests();
-        let cur_rx = self.total_bytes_rx();
-        let cur_tx = self.total_bytes_tx();
-
-        let q = self.rate_samples.lock().unwrap();
-        // Newest sample at or before the window start is the rate baseline.
-        let target = now_ms.saturating_sub(RATE_WINDOW_MS);
-        let base = q
-            .iter()
-            .rev()
-            .find(|s| s.ts_ms <= target)
-            .or_else(|| q.front());
-
-        let (dt_ms, b_req, b_rx, b_tx) = match base {
-            Some(b) => (
-                now_ms.saturating_sub(b.ts_ms).max(1),
-                b.requests,
-                b.bytes_rx,
-                b.bytes_tx,
-            ),
-            // No samples yet (first second after boot): rate since start.
-            None => (now_ms.max(1), 0, 0, 0),
-        };
-        let dt = dt_ms as f64 / 1000.0;
-        (
-            ((cur_req.saturating_sub(b_req)) as f64 / dt) as u64,
-            ((cur_rx.saturating_sub(b_rx)) as f64 / dt) as u64,
-            ((cur_tx.saturating_sub(b_tx)) as f64 / dt) as u64,
-        )
+        let cutoff = now_ms.saturating_sub(seconds.saturating_mul(1000));
+        let samples = self.with_samples(|q| {
+            q.iter()
+                .filter(|s| s.ts_ms >= cutoff)
+                .map(|s| {
+                    serde_json::json!({
+                        "t": s.ts_ms / 1000,
+                        "requests": s.requests,
+                        "bytes_rx": s.bytes_rx,
+                        "bytes_tx": s.bytes_tx,
+                        "udp4_requests": s.udp4_requests,
+                        "udp6_requests": s.udp6_requests,
+                        "http_requests": s.http_requests,
+                        "udp4_bytes_rx": s.udp4_bytes_rx,
+                        "udp6_bytes_rx": s.udp6_bytes_rx,
+                        "http_bytes_rx": s.http_bytes_rx,
+                        "udp4_bytes_tx": s.udp4_bytes_tx,
+                        "udp6_bytes_tx": s.udp6_bytes_tx,
+                        "http_bytes_tx": s.http_bytes_tx,
+                        "torrents": s.torrents,
+                        "peers": s.peers,
+                        "seeders": s.seeders,
+                        "leechers": s.leechers,
+                        "peers_added": s.peers_added,
+                        "peers_removed": s.peers_removed,
+                        "rss_bytes": s.rss_bytes,
+                        "cpu_percent": s.cpu_percent_x10 as f64 / 10.0,
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        serde_json::json!({ "seconds": seconds, "samples": samples })
     }
 
     /// Prometheus text exposition format for /metrics.
-    /// `store_totals` = (torrents, peers, seeders, leechers).
+    /// `store_totals` = (torrents, peers, seeders, leechers);
+    /// `swarm_bytes` = estimated swarm-store memory.
     pub fn prometheus_text(
         &self,
         store_totals: (u64, u64, u64, u64),
         torrents_created: u64,
+        swarm_bytes: u64,
         version: &str,
     ) -> String {
         let uptime = self.started.elapsed().as_secs();
         let (torrents, peers, seeders, leechers) = store_totals;
-        let (req_rate, rx_rate, tx_rate) = self.compute_rates();
-        let mut s = String::with_capacity(4096);
+        let rates = self.compute_rates();
+        let mut s = String::with_capacity(8192);
         s.push_str("# HELP tsunami_info Tracker build info\n# TYPE tsunami_info gauge\ntsunami_info{version=\"");
         s.push_str(version);
         s.push_str("\"} 1\n");
@@ -276,18 +465,48 @@ impl Stats {
         s.push_str(&format!("tsunami_peers_added_total {}\n", self.peers_added.load(Ordering::Relaxed)));
         s.push_str("# HELP tsunami_peers_removed_total Peers removed\n# TYPE tsunami_peers_removed_total counter\n");
         s.push_str(&format!("tsunami_peers_removed_total {}\n", self.peers_removed.load(Ordering::Relaxed)));
+        s.push_str("# HELP tsunami_peers_joined_per_second Peer join rate\n# TYPE tsunami_peers_joined_per_second gauge\n");
+        s.push_str(&format!("tsunami_peers_joined_per_second {}\n", rates.peers_added_per_sec));
+        s.push_str("# HELP tsunami_peers_left_per_second Peer leave rate\n# TYPE tsunami_peers_left_per_second gauge\n");
+        s.push_str(&format!("tsunami_peers_left_per_second {}\n", rates.peers_removed_per_sec));
         s.push_str("# HELP tsunami_torrents_created_total Torrents created\n# TYPE tsunami_torrents_created_total counter\n");
         s.push_str(&format!("tsunami_torrents_created_total {torrents_created}\n"));
         s.push_str("# HELP tsunami_requests_per_second Requests per second\n# TYPE tsunami_requests_per_second gauge\n");
-        s.push_str(&format!("tsunami_requests_per_second {req_rate}\n"));
+        s.push_str(&format!("tsunami_requests_per_second {}\n", rates.requests_per_sec));
         s.push_str("# HELP tsunami_bytes_rx_per_second Bytes received per second\n# TYPE tsunami_bytes_rx_per_second gauge\n");
-        s.push_str(&format!("tsunami_bytes_rx_per_second {rx_rate}\n"));
+        s.push_str(&format!("tsunami_bytes_rx_per_second {}\n", rates.bytes_rx_per_sec));
         s.push_str("# HELP tsunami_bytes_tx_per_second Bytes sent per second\n# TYPE tsunami_bytes_tx_per_second gauge\n");
-        s.push_str(&format!("tsunami_bytes_tx_per_second {tx_rate}\n"));
+        s.push_str(&format!("tsunami_bytes_tx_per_second {}\n", rates.bytes_tx_per_sec));
+        // Per-protocol rates.
+        for (name, r) in [
+            ("udp_ipv4", rates.udp4),
+            ("udp_ipv6", rates.udp6),
+            ("http", rates.http),
+        ] {
+            s.push_str(&format!(
+                "# HELP tsunami_{name}_requests_per_second Requests per second\n# TYPE tsunami_{name}_requests_per_second gauge\ntsunami_{name}_requests_per_second {}\n",
+                r.requests_per_sec
+            ));
+            s.push_str(&format!(
+                "# HELP tsunami_{name}_bytes_rx_per_second Bytes received per second\n# TYPE tsunami_{name}_bytes_rx_per_second gauge\ntsunami_{name}_bytes_rx_per_second {}\n",
+                r.bytes_rx_per_sec
+            ));
+            s.push_str(&format!(
+                "# HELP tsunami_{name}_bytes_tx_per_second Bytes sent per second\n# TYPE tsunami_{name}_bytes_tx_per_second gauge\ntsunami_{name}_bytes_tx_per_second {}\n",
+                r.bytes_tx_per_sec
+            ));
+        }
         s.push_str("# HELP tsunami_http_connections Active HTTP connections\n# TYPE tsunami_http_connections gauge\n");
         s.push_str(&format!("tsunami_http_connections {}\n", self.http_connections.load(Ordering::Relaxed)));
         s.push_str("# HELP tsunami_cqe_overflow_total io_uring completions dropped on CQ overflow\n# TYPE tsunami_cqe_overflow_total counter\n");
         s.push_str(&format!("tsunami_cqe_overflow_total {}\n", self.cqe_overflow.load(Ordering::Relaxed)));
+        // System gauges.
+        s.push_str("# HELP tsunami_memory_rss_bytes Process resident set size\n# TYPE tsunami_memory_rss_bytes gauge\n");
+        s.push_str(&format!("tsunami_memory_rss_bytes {}\n", self.rss_bytes.load(Ordering::Relaxed)));
+        s.push_str("# HELP tsunami_memory_swarm_bytes Estimated swarm-store bytes\n# TYPE tsunami_memory_swarm_bytes gauge\n");
+        s.push_str(&format!("tsunami_memory_swarm_bytes {swarm_bytes}\n"));
+        s.push_str("# HELP tsunami_cpu_percent CPU utilisation percent\n# TYPE tsunami_cpu_percent gauge\n");
+        s.push_str(&format!("tsunami_cpu_percent {}\n", self.cpu_percent_x10.load(Ordering::Relaxed) as f64 / 10.0));
         for (name, p, family) in [
             ("udp_ipv4", &self.udp_ipv4, "4"),
             ("udp_ipv6", &self.udp_ipv6, "6"),
@@ -316,6 +535,14 @@ impl Stats {
     }
 }
 
+fn proto_rate_json(r: &ProtoRate) -> serde_json::Value {
+    serde_json::json!({
+        "requests_per_sec": r.requests_per_sec,
+        "bytes_rx_per_sec": r.bytes_rx_per_sec,
+        "bytes_tx_per_sec": r.bytes_tx_per_sec,
+    })
+}
+
 fn proto_json(p: &ProtoStats) -> serde_json::Value {
     serde_json::json!({
         "requests": p.requests.load(Ordering::Relaxed),
@@ -327,6 +554,9 @@ fn proto_json(p: &ProtoStats) -> serde_json::Value {
         "bytes_tx": p.bytes_tx.load(Ordering::Relaxed),
         "dropped": p.dropped.load(Ordering::Relaxed),
         "rate_limited": p.rate_limited.load(Ordering::Relaxed),
+        "ev_started": p.ev_started.load(Ordering::Relaxed),
+        "ev_completed": p.ev_completed.load(Ordering::Relaxed),
+        "ev_stopped": p.ev_stopped.load(Ordering::Relaxed),
     })
 }
 
@@ -351,6 +581,9 @@ fn proto_prom(s: &mut String, proto: &str, ipver: &str, p: &ProtoStats) {
     m!("errors_total", "Errors", p.errors.load(Ordering::Relaxed), "counter");
     m!("dropped_total", "Dropped responses", p.dropped.load(Ordering::Relaxed), "counter");
     m!("rate_limited_total", "Requests shed by rate limiter", p.rate_limited.load(Ordering::Relaxed), "counter");
+    m!("ev_started_total", "Announce started events", p.ev_started.load(Ordering::Relaxed), "counter");
+    m!("ev_completed_total", "Announce completed events", p.ev_completed.load(Ordering::Relaxed), "counter");
+    m!("ev_stopped_total", "Announce stopped events", p.ev_stopped.load(Ordering::Relaxed), "counter");
     m!("bytes_rx_total", "Bytes received", p.bytes_rx.load(Ordering::Relaxed), "counter");
     m!("bytes_tx_total", "Bytes sent", p.bytes_tx.load(Ordering::Relaxed), "counter");
 }
@@ -358,4 +591,50 @@ fn proto_prom(s: &mut String, proto: &str, ipver: &str, p: &ProtoStats) {
 // Serialize helper used by write_json_to
 pub fn to_json_string(v: &serde_json::Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into())
+}
+
+// ---------------- system probing (Linux /proc) ----------------
+
+/// Clock ticks per second (USER_HZ) for converting /proc jiffies to seconds.
+pub fn clock_ticks() -> u64 {
+    // SAFETY: sysconf is always safe to call.
+    let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if v > 0 { v as u64 } else { 100 }
+}
+
+/// Process resident set size in bytes, from /proc/self/status.
+pub fn read_rss_bytes() -> u64 {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            // "VmRSS:    12345 kB"
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            return kb.saturating_mul(1024);
+        }
+    }
+    0
+}
+
+/// Total process CPU time (utime + stime) in jiffies, from /proc/self/stat.
+/// Field parsing skips the parenthesised comm which may contain spaces.
+pub fn read_cpu_jiffies() -> u64 {
+    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
+        return 0;
+    };
+    // Fields after the closing ')' of comm: state(3) ppid(4) ... utime(14) stime(15).
+    let Some(close) = stat.rfind(')') else {
+        return 0;
+    };
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    // fields[0] = state (field 3). utime is field 14 => index 14-3 = 11.
+    // stime is field 15 => index 12.
+    let utime: u64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let stime: u64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0);
+    utime.saturating_add(stime)
 }

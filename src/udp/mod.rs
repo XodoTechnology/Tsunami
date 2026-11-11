@@ -58,6 +58,9 @@ struct LocalStats {
     rate_limited: u64,
     peers_added: u64,
     peers_removed: u64,
+    ev_started: u64,
+    ev_completed: u64,
+    ev_stopped: u64,
 }
 
 impl LocalStats {
@@ -78,6 +81,10 @@ impl LocalStats {
         stats
             .peers_removed
             .fetch_add(self.peers_removed, Ordering::Relaxed);
+        g.ev_started.fetch_add(self.ev_started, Ordering::Relaxed);
+        g.ev_completed
+            .fetch_add(self.ev_completed, Ordering::Relaxed);
+        g.ev_stopped.fetch_add(self.ev_stopped, Ordering::Relaxed);
         *self = Self::default();
     }
 }
@@ -401,6 +408,12 @@ impl Worker {
                     self.stats.client_stats.record(&req.peer_id);
                 }
                 let event = AnnounceEvent::from_wire(req.event as i32);
+                match event {
+                    AnnounceEvent::Started => self.local_mut(is_v4_sock).ev_started += 1,
+                    AnnounceEvent::Completed => self.local_mut(is_v4_sock).ev_completed += 1,
+                    AnnounceEvent::Stopped => self.local_mut(is_v4_sock).ev_stopped += 1,
+                    AnnounceEvent::None => {}
+                }
                 let now = self.now();
                 let txid = req.transaction_id;
                 let (ip, port, peer_id, left, numwant) =
