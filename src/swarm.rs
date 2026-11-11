@@ -817,12 +817,12 @@ impl<S: Slot> FamilyStore<S> {
     }
 
     /// Find a swarm's peer list for the torrent-detail API.
-    /// Returns (seeders, leechers, peers) where peers are endpoints.
+    /// Returns (seeders, leechers, peers) where peers are (endpoint, seeder).
     pub fn torrent_peers(
         &self,
         info_hash: &InfoHash,
         max_peers: usize,
-    ) -> Option<(u32, u32, Vec<PeerEndpoint>)> {
+    ) -> Option<(u32, u32, Vec<(PeerEndpoint, bool)>)> {
         let shard = &self.shards[self.shard_index(info_hash)];
         let r = shard.read();
         let lock = r.get(info_hash)?;
@@ -938,7 +938,7 @@ impl<S: Slot> FamilyStore<S> {
 
 // Helper on Swarm for the API path (sample without exclude, cap at len).
 impl<S: Slot> Swarm<S> {
-    fn sample_for_api(&self, max_peers: usize, out: &mut Vec<PeerEndpoint>) {
+    fn sample_for_api(&self, max_peers: usize, out: &mut Vec<(PeerEndpoint, bool)>) {
         out.clear();
         if self.peers.is_empty() || max_peers == 0 {
             return;
@@ -946,7 +946,7 @@ impl<S: Slot> Swarm<S> {
         // For an admin API, "first N" is acceptable and cheapest; peer order
         // is already arbitrary due to swap_remove churn.
         for p in self.peers.iter().take(max_peers) {
-            out.push(p.endpoint());
+            out.push((p.endpoint(), p.is_seeder()));
         }
     }
 }
@@ -1066,20 +1066,29 @@ impl Store {
         (t4 + t6, p4 + p6, s4 + s6, l4 + l6)
     }
 
-    /// Rough estimate of swarm-store heap bytes: dense peer slots + per-
-    /// torrent map/RwLock overhead + optional peer_id side table. Used for
-    /// capacity observability; not exact (excludes allocator slack).
+    /// Rough estimate of swarm-store heap bytes: dense peer slots + per-peer
+    /// hash-index entries + per-torrent map/RwLock overhead + optional
+    /// peer_id side table. Used for capacity observability; not exact
+    /// (excludes Vec/HashMap capacity slack and allocator overhead).
     pub fn memory_estimate_bytes(&self) -> u64 {
         let (t4, p4, _, _) = self.v4.totals();
         let (t6, p6, _, _) = self.v6.totals();
-        let mut bytes = p4 * std::mem::size_of::<Slot4>() as u64
-            + p6 * std::mem::size_of::<Slot6>() as u64;
+        // Per peer: slot in the dense Vec + one entry in the swarm's
+        // index HashMap (key + u32 slot index + 1B control, at hashbrown's
+        // ~87.5% max load => x8/7). peer_ids adds key + 20B PeerId + ctrl.
+        let key4 = std::mem::size_of::<u64>() as u64;
+        let key6 = std::mem::size_of::<Key6>() as u64;
+        let idx4 = (key4 + 4 + 1) * 8 / 7;
+        let idx6 = (key6 + 4 + 1) * 8 / 7;
+        let pid4 = (key4 + 20 + 1) * 8 / 7;
+        let pid6 = (key6 + 20 + 1) * 8 / 7;
+        let mut bytes = p4 * (std::mem::size_of::<Slot4>() as u64 + idx4)
+            + p6 * (std::mem::size_of::<Slot6>() as u64 + idx6);
         // Per-torrent: InfoHash key + HashMap node + RwLock<Swarm> header.
         let torrent_overhead = (std::mem::size_of::<InfoHash>() + 232) as u64;
         bytes += (t4 + t6) * torrent_overhead;
         if self.store_peer_id {
-            // peer_ids HashMap: key + 20B PeerId + control/alloc overhead.
-            bytes += (p4 + p6) * 96;
+            bytes += p4 * pid4 + p6 * pid6;
         }
         bytes
     }
@@ -1099,11 +1108,12 @@ impl Store {
 
     /// Per-torrent detail summed across families is not possible for peer
     /// lists (families are separate); return per-family instead.
+    /// Peers are (endpoint, seeder) pairs.
     pub fn torrent_detail(
         &self,
         info_hash: &InfoHash,
         max_peers: usize,
-    ) -> Option<(u32, u32, Vec<PeerEndpoint>)> {
+    ) -> Option<(u32, u32, Vec<(PeerEndpoint, bool)>)> {
         // prefer whichever family has the torrent; if both, merge counts and
         // take peers from v4 first then v6
         let d4 = self.v4.torrent_peers(info_hash, max_peers);

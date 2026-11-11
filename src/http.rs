@@ -895,8 +895,12 @@ fn api_torrent(hex: &str, query: &str, store: &Arc<Store>) -> Response {
     };
     let peer_list: Vec<serde_json::Value> = peers
         .iter()
-        .map(|p| {
-            let mut o = serde_json::json!({ "ip": p.ip.to_string(), "port": p.port });
+        .map(|(p, seeder)| {
+            let mut o = serde_json::json!({
+                "ip": p.ip.to_string(),
+                "port": p.port,
+                "seeder": seeder,
+            });
             if let Some(pid) = store.peer_id_for(&hash, &p.ip, p.port) {
                 o["peer_id"] = serde_json::json!(String::from_utf8_lossy(&pid).trim_matches('\0').to_string());
             }

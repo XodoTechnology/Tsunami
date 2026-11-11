@@ -257,6 +257,7 @@ fn spawn_rate_sampler(stats: &Arc<Stats>, store: &Arc<Store>) {
                 seeders,
                 leechers,
                 rss_bytes: tsunami::stats::read_rss_bytes(),
+                swarm_bytes: store.memory_estimate_bytes(),
                 cpu_percent_x10,
             };
             stats.push_rate_sample(&gauges);

@@ -50,15 +50,20 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
   tracked torrent (BEP-12 format, same as opentracker's fullscrape). Enable
   with `http.full_scrape`. HTTP only — UDP scrape is per-hash-list by design.
 - **HTML dashboard** at `/` and `/dashboard` — self-contained stats page
-  (no CDN) with live cards, per-protocol breakdown, SVG time-series graphs
-  (requests/s, peers, bandwidth), system gauges, top torrents and clients.
-  Enable with `http.dashboard` (default on).
+  (no CDN) covering every stats endpoint: live cards, full per-protocol
+  counter matrix, SVG time-series graphs (requests/s, peers, bandwidth,
+  per-protocol bandwidth, churn, memory, CPU), system gauges, top
+  torrents (click for peer list), top clients, and raw JSON/Prometheus
+  viewers. Every card, panel and chart can be toggled via the Customize
+  drawer (persisted in `localStorage`). Enable with `http.dashboard`
+  (default on).
 - **Stats API** (JSON):
   - `GET /api/stats` — totals, per-protocol counters + rates, system gauges
     (RSS/CPU/swarm-bytes), announce-event breakdown, top clients
   - `GET /api/timeseries?seconds=` — per-second samples for graphing
   - `GET /api/torrents?limit=&offset=` — torrent list sorted by swarm size
   - `GET /api/torrent/{info_hash_hex}?limit=` — per-torrent detail + peers
+    (ip, port, seeder flag, peer_id when `protocol.store_peer_id`)
   - `GET /api/clients?n=` — top clients by announce count (BEP 20 names)
 - **Prometheus metrics**: `GET /metrics` — counters, gauges, and per-protocol
   rates in Prometheus text format (Grafana/alerting ready).

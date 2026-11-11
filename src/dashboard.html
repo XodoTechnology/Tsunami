@@ -14,129 +14,274 @@
   body {
     background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    padding: 24px; max-width: 1240px; margin: 0 auto;
+    padding: 24px; max-width: 1280px; margin: 0 auto;
   }
-  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
   h1 { font-size: 22px; font-weight: 650; letter-spacing: .3px; }
   h1 .dot { color: var(--accent); }
   .sub { color: var(--muted); font-size: 13px; }
-  .live { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 12px; }
   .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: p 1.6s infinite; }
   @keyframes p { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
 
   .grid { display: grid; gap: 14px; }
-  .cards { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px; }
+  .cards { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); margin-bottom: 14px; }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 16px 18px;
+    padding: 14px 16px;
   }
-  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
-  .card .value { font-size: 26px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .value { font-size: 24px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .card .value.green { color: var(--green); } .card .value.amber { color: var(--amber); }
   .card .value.blue { color: var(--accent); } .card .value.purple { color: var(--purple); }
   .card .value.red { color: var(--red); }
 
   .cols { grid-template-columns: 1fr 1fr; }
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .charts { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); margin-top: 14px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   .panel h2 {
     font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase;
-    letter-spacing: .6px; padding: 14px 18px; border-bottom: 1px solid var(--border);
-    display:flex; justify-content:space-between; align-items:center;
+    letter-spacing: .6px; padding: 13px 16px; border-bottom: 1px solid var(--border);
+    display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
   }
   .panel h2 .hint { font-weight:400; text-transform:none; letter-spacing:0; font-size:11px; color:var(--muted); }
+  .panel h2 .tabs { display:flex; gap:4px; }
+  .panel h2 .tabs button { padding:3px 9px; font-size:11px; border-radius:6px; }
+  .panel h2 .tabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 9px 18px; font-size: 13px; }
-  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  th, td { text-align: left; padding: 8px 16px; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
   tbody tr + tr { border-top: 1px solid var(--border); }
   td.num, th.num { text-align: right; }
+  tbody tr.clickable { cursor: pointer; }
+  tbody tr.clickable:hover { background: var(--panel2); }
   .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--accent); }
-  .client { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .empty { padding: 22px 18px; color: var(--muted); text-align: center; }
-  .kv { display: flex; justify-content: space-between; padding: 8px 18px; font-size: 13px; }
+  .client, .peerid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .empty { padding: 20px 16px; color: var(--muted); text-align: center; }
+  .kv { display: flex; justify-content: space-between; padding: 7px 16px; font-size: 13px; }
   .kv + .kv { border-top: 1px solid var(--border); }
   .kv .k { color: var(--muted); } .kv .v { font-variant-numeric: tabular-nums; }
   .kv .v .dim { color: var(--muted); font-size: 11px; }
+  .scroll { max-height: 380px; overflow-y: auto; }
+  .scroll-x { overflow-x: auto; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px;
+    border: 1px solid var(--border);
+  }
+  .badge.seed { color: var(--green); border-color: var(--green); }
+  .badge.leech { color: var(--amber); border-color: var(--amber); }
+  .badge.err { color: var(--red); border-color: var(--red); }
 
   /* charts */
-  .chart { padding: 10px 14px 14px; }
-  .chart + .chart { border-top: 1px solid var(--border); }
-  .chart .ctitle { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 2px 4px 6px; display:flex; justify-content:space-between;}
-  .legend { display:flex; gap:12px; font-size:11px; color:var(--muted); }
+  .chart { padding: 8px 12px 12px; }
+  .ctitle { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 2px 4px 6px; display:flex; justify-content:space-between;}
+  .legend { display:flex; gap:12px; font-size:11px; color:var(--muted); flex-wrap:wrap; }
   .legend span { display:inline-flex; align-items:center; gap:5px; }
   .legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
   svg text { font-family: inherit; }
+
+  /* raw viewer */
+  pre.raw {
+    padding: 14px 16px; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text); max-height: 480px; overflow: auto; white-space: pre;
+  }
+  pre.raw .k { color: var(--accent); } pre.raw .n { color: var(--amber); }
+  pre.raw .s { color: var(--green); } pre.raw .b { color: var(--purple); }
+
   footer { margin-top: 20px; color: var(--muted); font-size: 12px; text-align: center; }
   footer a { color: var(--accent); text-decoration: none; }
+
+  /* settings drawer */
+  .drawerBg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5); opacity: 0;
+    pointer-events: none; transition: opacity .15s; z-index: 40;
+  }
+  .drawerBg.open { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 300px; z-index: 50;
+    background: var(--panel); border-left: 1px solid var(--border);
+    transform: translateX(100%); transition: transform .18s ease;
+    display: flex; flex-direction: column;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px; border-bottom: 1px solid var(--border);
+  }
+  .drawer-head h3 { font-size: 14px; font-weight: 600; }
+  .drawer-body { flex: 1; overflow-y: auto; padding: 8px 0 16px; }
+  .wgroup { padding: 10px 16px 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .witem {
+    display: flex; align-items: center; gap: 10px; padding: 7px 16px;
+    font-size: 13px; cursor: pointer; user-select: none;
+  }
+  .witem:hover { background: var(--panel2); }
+  .witem input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+  .drawer-foot { padding: 12px 16px; border-top: 1px solid var(--border); }
+  .drawer-foot button { width: 100%; }
+
+  /* torrent detail modal */
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 60;
+    display: none; align-items: center; justify-content: center; padding: 24px;
+  }
+  .modal.open { display: flex; }
+  .modal-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    width: 100%; max-width: 860px; max-height: 84vh; display: flex; flex-direction: column;
+  }
+  .modal-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px; border-bottom: 1px solid var(--border); gap: 10px;
+  }
+  .modal-head h3 { font-size: 14px; font-weight: 600; word-break: break-all; }
+  .modal-body { overflow-y: auto; padding: 6px 0 14px; }
+  .modal-sum { padding: 10px 18px; font-size: 13px; color: var(--muted); }
 </style>
 </head>
 <body>
 <header>
   <h1>Tsunami<span class="dot">●</span> Tracker</h1>
   <span class="sub" id="ver"></span>
-  <span class="live"><span class="pulse"></span><span id="upd">connecting…</span></span>
+  <span class="live">
+    <span class="pulse"></span><span id="upd">connecting…</span>
+    <button id="customizeBtn">Customize</button>
+  </span>
 </header>
 
 <div class="grid cards" id="cards"></div>
 
 <div class="grid cols">
-  <div class="panel">
-    <h2>Throughput <span class="hint">req/s + B/s</span></h2>
+  <div class="panel" data-w="panel_throughput">
+    <h2>Throughput <span class="hint">fixed 10s window · per-second</span></h2>
     <div id="rates"></div>
   </div>
-  <div class="panel">
-    <h2>Protocols</h2>
-    <div id="protos"></div>
+  <div class="panel" data-w="panel_system">
+    <h2>System</h2>
+    <div id="system"></div>
   </div>
 </div>
 
-<div class="panel" style="margin-top:14px">
-  <h2>Activity <span class="hint">last 5 min · per-second</span></h2>
-  <div class="chart">
-    <div class="ctitle"><span>Requests / sec</span>
+<div class="panel" data-w="panel_protocols" style="margin-top:14px">
+  <h2>Protocols <span class="hint">cumulative totals · rates per-second</span></h2>
+  <div class="scroll-x"><div id="protos"></div></div>
+</div>
+
+<div class="grid charts">
+  <div class="panel" data-w="chart_req">
+    <h2>Requests / sec
       <span class="legend">
         <span><i style="background:var(--accent)"></i>UDP v4</span>
         <span><i style="background:var(--purple)"></i>UDP v6</span>
         <span><i style="background:var(--green)"></i>HTTP</span>
-      </span></div>
-    <div id="g_req"></div>
+      </span></h2>
+    <div class="chart"><div id="g_req"></div></div>
   </div>
-  <div class="chart">
-    <div class="ctitle"><span>Peers</span>
+  <div class="panel" data-w="chart_peers">
+    <h2>Peers
       <span class="legend">
         <span><i style="background:var(--green)"></i>Total</span>
         <span><i style="background:var(--amber)"></i>Seeders</span>
         <span><i style="background:var(--red)"></i>Leechers</span>
-      </span></div>
-    <div id="g_peers"></div>
+      </span></h2>
+    <div class="chart"><div id="g_peers"></div></div>
   </div>
-  <div class="chart">
-    <div class="ctitle"><span>Bandwidth</span>
+  <div class="panel" data-w="chart_bw">
+    <h2>Bandwidth <span class="hint">all protocols</span>
       <span class="legend">
         <span><i style="background:var(--accent)"></i>In</span>
         <span><i style="background:var(--amber)"></i>Out</span>
-      </span></div>
-    <div id="g_bytes"></div>
+      </span></h2>
+    <div class="chart"><div id="g_bytes"></div></div>
+  </div>
+  <div class="panel" data-w="chart_bwp">
+    <h2>Bandwidth by protocol <span class="hint">rx+tx</span>
+      <span class="legend">
+        <span><i style="background:var(--accent)"></i>UDP v4</span>
+        <span><i style="background:var(--purple)"></i>UDP v6</span>
+        <span><i style="background:var(--green)"></i>HTTP</span>
+      </span></h2>
+    <div class="chart"><div id="g_bwp"></div></div>
+  </div>
+  <div class="panel" data-w="chart_churn">
+    <h2>Peer churn <span class="hint">joins / leaves per sec</span>
+      <span class="legend">
+        <span><i style="background:var(--green)"></i>Joined</span>
+        <span><i style="background:var(--red)"></i>Left</span>
+      </span></h2>
+    <div class="chart"><div id="g_churn"></div></div>
+  </div>
+  <div class="panel" data-w="chart_mem">
+    <h2>Memory
+      <span class="legend">
+        <span><i style="background:var(--red)"></i>RSS</span>
+        <span><i style="background:var(--purple)"></i>Swarm store</span>
+      </span></h2>
+    <div class="chart"><div id="g_mem"></div></div>
+  </div>
+  <div class="panel" data-w="chart_cpu">
+    <h2>CPU <span class="hint">% of machine</span></h2>
+    <div class="chart"><div id="g_cpu"></div></div>
   </div>
 </div>
 
 <div class="grid cols" style="margin-top:14px">
-  <div class="panel">
-    <h2>System</h2>
-    <div id="system"></div>
+  <div class="panel" data-w="panel_clients">
+    <h2>Top clients <span class="hint" id="clientsHint"></span></h2>
+    <div class="scroll"><div id="clients"></div></div>
   </div>
-  <div class="panel">
-    <h2>Top clients</h2>
-    <div id="clients"></div>
+  <div class="panel" data-w="panel_torrents">
+    <h2>Top torrents <span class="hint" id="torrentsHint"></span></h2>
+    <div class="scroll"><div id="torrents"></div></div>
   </div>
 </div>
 
-<div class="panel" style="margin-top:14px">
-  <h2>Top torrents</h2>
-  <div id="torrents"></div>
+<div class="panel" data-w="panel_raw" style="margin-top:14px">
+  <h2>Raw endpoints
+    <span class="hint">identical to the HTTP APIs</span>
+    <span class="tabs">
+      <button data-rtab="json" class="on">/api/stats JSON</button>
+      <button data-rtab="metrics">/metrics</button>
+    </span>
+  </h2>
+  <pre class="raw" id="rawJson"></pre>
+  <pre class="raw" id="rawMetrics" hidden></pre>
 </div>
 
-<footer>Tsunami · <a href="/api/stats">/api/stats</a> · <a href="/api/timeseries">/api/timeseries</a> · <a href="/metrics">/metrics</a></footer>
+<footer>Tsunami ·
+  <a href="/api/stats">/api/stats</a> ·
+  <a href="/api/timeseries">/api/timeseries</a> ·
+  <a href="/api/torrents">/api/torrents</a> ·
+  <a href="/api/clients">/api/clients</a> ·
+  <a href="/metrics">/metrics</a>
+</footer>
+
+<!-- settings drawer -->
+<div class="drawerBg" id="drawerBg"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head"><h3>Customize dashboard</h3><button id="drawerClose">&times;</button></div>
+  <div class="drawer-body" id="widgetList"></div>
+  <div class="drawer-foot"><button id="resetWidgets">Reset to defaults</button></div>
+</div>
+
+<!-- torrent detail modal -->
+<div class="modal" id="tmodal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="tm_title">torrent</h3>
+      <button id="tm_close">&times;</button>
+    </div>
+    <div class="modal-sum" id="tm_sum"></div>
+    <div class="modal-body scroll"><div id="tm_body"></div></div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -155,6 +300,13 @@ const fmtB = n => {
   if (n >= 1e3) return (n/1e3).toFixed(1)+' KB/s';
   return n+' B/s';
 };
+const fmtBr = n => { // rate bytes, compact
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n/1e9).toFixed(2)+' GB/s';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+' MB/s';
+  if (n >= 1e3) return (n/1e3).toFixed(0)+' KB/s';
+  return n.toFixed(0)+' B/s';
+};
 const fmtBytes = n => {
   n = Number(n) || 0;
   if (n >= 1e9) return (n/1e9).toFixed(2)+' GB';
@@ -166,19 +318,102 @@ const up = s => {
   s = Number(s)||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60;
   return (d?d+'d ':'')+(h?h+'h ':'')+(m?m+'m ':'')+x+'s';
 };
+// HTML-escape for attacker-controlled strings (client sigs, peer_ids).
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-function card(label, value, cls) {
-  return `<div class="card"><div class="label">${label}</div><div class="value ${cls||''}">${value}</div></div>`;
+// ---------- widget visibility (localStorage) ----------
+const LS_KEY = 'tsunami_dash_v1';
+let hidden = {};
+try { hidden = (JSON.parse(localStorage.getItem(LS_KEY)) || {}).hidden || {}; } catch(e) { hidden = {}; }
+const isVisible = id => !hidden[id];
+function saveHidden() { try { localStorage.setItem(LS_KEY, JSON.stringify({hidden})); } catch(e){} }
+function applyWidgets() {
+  document.querySelectorAll('[data-w]').forEach(el => { el.hidden = !!hidden[el.dataset.w]; });
+}
+
+const WIDGET_GROUPS = [
+  ['Cards', [
+    ['card_peers','Peers'], ['card_seeders','Seeders'], ['card_leechers','Leechers'],
+    ['card_torrents','Torrents'], ['card_reqps','Requests / sec'],
+    ['card_joinps','Peer joins / sec'], ['card_mem','Memory (RSS)'],
+    ['card_cpu','CPU'], ['card_httpconns','HTTP connections'],
+    ['card_cq','CQ overflows'],
+  ]],
+  ['Panels', [
+    ['panel_throughput','Throughput'], ['panel_protocols','Protocols'],
+    ['panel_system','System'], ['panel_clients','Top clients'],
+    ['panel_torrents','Top torrents'], ['panel_raw','Raw endpoints'],
+  ]],
+  ['Charts', [
+    ['chart_req','Requests / sec'], ['chart_peers','Peers'],
+    ['chart_bw','Bandwidth'], ['chart_bwp','Bandwidth by protocol'],
+    ['chart_churn','Peer churn'], ['chart_mem','Memory'], ['chart_cpu','CPU %'],
+  ]],
+];
+
+// build settings list once
+(function buildWidgetList() {
+  const host = $('widgetList');
+  WIDGET_GROUPS.forEach(([g, items]) => {
+    const gh = document.createElement('div');
+    gh.className = 'wgroup'; gh.textContent = g;
+    host.appendChild(gh);
+    items.forEach(([id, name]) => {
+      const l = document.createElement('label');
+      l.className = 'witem';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = isVisible(id); cb.dataset.wid = id;
+      cb.addEventListener('change', () => {
+        if (cb.checked) delete hidden[id]; else hidden[id] = true;
+        saveHidden(); applyWidgets();
+      });
+      l.appendChild(cb);
+      l.appendChild(document.createTextNode(name));
+      host.appendChild(l);
+    });
+  });
+})();
+
+// drawer wiring
+$('customizeBtn').addEventListener('click', () => { $('drawer').classList.add('open'); $('drawerBg').classList.add('open'); });
+function closeDrawer() { $('drawer').classList.remove('open'); $('drawerBg').classList.remove('open'); }
+$('drawerClose').addEventListener('click', closeDrawer);
+$('drawerBg').addEventListener('click', closeDrawer);
+$('resetWidgets').addEventListener('click', () => { hidden = {}; saveHidden(); applyWidgets(); buildChecks(); });
+function buildChecks() {
+  document.querySelectorAll('#widgetList input[data-wid]').forEach(cb => { cb.checked = isVisible(cb.dataset.wid); });
+}
+
+// raw tabs
+let rawTab = 'json';
+function renderRaw() {
+  if (rawTab === 'json') {
+    $('rawJson').innerHTML = lastStats ? jsonHighlight(JSON.stringify(lastStats, null, 2)) : '';
+  } else {
+    $('rawMetrics').textContent = lastMetrics || '(empty)';
+  }
+}
+document.querySelectorAll('[data-rtab]').forEach(b => b.addEventListener('click', () => {
+  rawTab = b.dataset.rtab;
+  document.querySelectorAll('[data-rtab]').forEach(x => x.classList.toggle('on', x === b));
+  $('rawJson').hidden = rawTab !== 'json';
+  $('rawMetrics').hidden = rawTab !== 'metrics';
+  renderRaw();
+}));
+
+// ---------- helpers ----------
+function card(label, value, cls, id) {
+  return `<div class="card" data-w="${id}"><div class="label">${label}</div><div class="value ${cls||''}">${value}</div></div>`;
 }
 const row = (k,v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+const sub = (k,v) => `<div class="kv" style="padding-left:26px"><span class="k" style="font-size:12px">${k}</span><span class="v" style="font-size:12px"><span class="dim">${v}</span></span></div>`;
 
 // ---- SVG multi-series line chart ----
-// series: [{label,color,points:[[t,y],...]}]  (t = seconds, y = value)
 function drawChart(elId, series, yFmt) {
   const el = $(elId);
-  const W = 640, H = 96, PL = 46, PR = 8, PT = 8, PB = 16;
+  if (!el) return;
+  const W = 640, H = 110, PL = 52, PR = 8, PT = 8, PB = 18;
   const iw = W - PL - PR, ih = H - PT - PB;
-  // time range across all series
   let t0 = Infinity, t1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   series.forEach(s => s.points.forEach(p => {
     if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0];
@@ -187,31 +422,25 @@ function drawChart(elId, series, yFmt) {
   if (!isFinite(t0)) { el.innerHTML = '<div class="empty" style="padding:8px">no data yet</div>'; return; }
   if (t1 - t0 < 1) t1 = t0 + 1;
   if (y1 - y0 < 1e-9) { y0 = 0; y1 = Math.max(1, y0 + 1); }
-  // nice y padding
   const padY = (y1 - y0) * 0.08; y0 -= padY; y1 += padY;
   const X = t => PL + (t - t0) / (t1 - t0) * iw;
   const Y = v => PT + ih - (v - y0) / (y1 - y0) * ih;
   let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display:block">`;
-  // horizontal gridlines (3)
   for (let i = 0; i <= 3; i++) {
     const gy = PT + ih * i / 3, gv = y1 - (y1 - y0) * i / 3;
     svg += `<line x1="${PL}" y1="${gy}" x2="${W-PR}" y2="${gy}" stroke="#232a38" stroke-width="1"/>`;
     svg += `<text x="${PL-5}" y="${gy+3}" text-anchor="end" font-size="9" fill="#8b95a9">${yFmt(gv)}</text>`;
   }
-  // x labels: start / mid / end. `t` is seconds-since-boot (uptime), so
-  // "ago" is relative to the newest sample (t1), not wall-clock.
   const xt = [t0, (t0+t1)/2, t1];
   xt.forEach(t => {
     const ago = Math.max(0, Math.round(t1 - t));
     const lbl = ago < 60 ? ago+'s' : ago < 3600 ? Math.round(ago/60)+'m' : Math.round(ago/3600)+'h';
-    svg += `<text x="${X(t)}" y="${H-4}" text-anchor="middle" font-size="9" fill="#8b95a9">-${lbl}</text>`;
+    svg += `<text x="${X(t)}" y="${H-3}" text-anchor="middle" font-size="9" fill="#8b95a9">-${lbl}</text>`;
   });
-  // series polylines
   series.forEach(s => {
     if (s.points.length < 2) return;
     const d = s.points.map(p => `${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' ');
     svg += `<polyline points="${d}" fill="none" stroke="${s.color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
-    // latest point dot
     const lp = s.points[s.points.length-1];
     svg += `<circle cx="${X(lp[0]).toFixed(1)}" cy="${Y(lp[1]).toFixed(1)}" r="2.4" fill="${s.color}"/>`;
   });
@@ -219,7 +448,6 @@ function drawChart(elId, series, yFmt) {
   el.innerHTML = svg;
 }
 
-// build per-second rate series from cumulative counters
 function rateSeries(samples, get) {
   const pts = [];
   for (let i = 1; i < samples.length; i++) {
@@ -230,102 +458,218 @@ function rateSeries(samples, get) {
   return pts;
 }
 const gaugeSeries = (samples, get) => samples.map(s => [s.t, get(s)]);
+const yBytes = v => v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'K' : v.toFixed(0);
+const yPct = v => v.toFixed(0)+'%';
+
+// ---------- torrent detail modal ----------
+function openTorrent(hash) {
+  $('tmodal').classList.add('open');
+  $('tm_title').textContent = hash;
+  $('tm_sum').textContent = 'loading…';
+  $('tm_body').innerHTML = '';
+  fetch(`/api/torrent/${hash}?limit=1000`)
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => {
+      const peers = d.peers || [];
+      $('tm_sum').innerHTML =
+        `<b class="hash">${esc(d.info_hash)}</b> · ` +
+        `<span style="color:var(--green)">${fmtI(d.seeders)} seeders</span> · ` +
+        `<span style="color:var(--amber)">${fmtI(d.leechers)} leechers</span> · ` +
+        `${fmtI(peers.length)} peers shown` +
+        (peers.length < (d.seeders + d.leechers) ? ` <span class="dim">(of ${fmtI(d.seeders + d.leechers)} total — capped)</span>` : '');
+      $('tm_body').innerHTML = peers.length ? `<table><thead><tr>
+        <th>IP</th><th class="num">Port</th><th>Type</th><th>Peer ID</th>
+        </tr></thead><tbody>` + peers.map(p =>
+        `<tr><td class="hash">${esc(p.ip)}</td><td class="num">${p.port}</td>` +
+        `<td>${p.seeder ? '<span class="badge seed">seed</span>' : '<span class="badge leech">leecher</span>'}</td>` +
+        `<td class="peerid">${p.peer_id ? esc(p.peer_id) : '<span class="dim">—</span>'}</td></tr>`).join('') +
+        `</tbody></table>` : '<div class="empty">No peers</div>';
+    })
+    .catch(e => { $('tm_sum').textContent = 'failed to load: ' + e.message; });
+}
+function closeTorrent() { $('tmodal').classList.remove('open'); }
+$('tm_close').addEventListener('click', closeTorrent);
+$('tmodal').addEventListener('click', e => { if (e.target === $('tmodal')) closeTorrent(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeTorrent(); closeDrawer(); } });
+
+// ---------- main tick ----------
+let lastStats = null, lastMetrics = '';
 
 async function tick() {
   try {
-    const [st, tr, ts] = await Promise.all([
+    const [st, tr, ts, cl, mt] = await Promise.all([
       fetch('/api/stats').then(r=>r.json()),
-      fetch('/api/torrents?limit=15').then(r=>r.json()),
+      fetch('/api/torrents?limit=200').then(r=>r.json()),
       fetch('/api/timeseries?seconds=300').then(r=>r.json()),
+      fetch('/api/clients?n=200').then(r=>r.json()),
+      fetch('/metrics').then(r=>r.text()).catch(()=>'')
     ]);
+    lastStats = st; lastMetrics = mt;
     const sw = st.swarm || {}, r = st.rates || {}, sys = st.system || {};
     $('ver').textContent = 'v' + (st.version||'?') + ' · up ' + up(st.uptime_seconds);
     $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
 
+    // ---- cards (all generated; visibility applied by data-w) ----
     $('cards').innerHTML =
-      card('Peers','<span style="color:var(--green)">'+fmt(sw.peers)+'</span>') +
-      card('Seeders',fmt(sw.seeders),'green') +
-      card('Leechers',fmt(sw.leechers),'amber') +
-      card('Torrents',fmt(sw.torrents),'blue') +
-      card('Req / sec',fmt(r.requests_per_sec),'purple') +
-      card('Memory',fmtBytes(sys.rss_bytes),'red') +
-      card('CPU',(sys.cpu_percent||0).toFixed(0)+'%','blue');
+      card('Peers','<span style="color:var(--green)">'+fmt(sw.peers)+'</span>','green','card_peers') +
+      card('Seeders',fmt(sw.seeders),'green','card_seeders') +
+      card('Leechers',fmt(sw.leechers),'amber','card_leechers') +
+      card('Torrents',fmt(sw.torrents),'blue','card_torrents') +
+      card('Req / sec',fmt(r.requests_per_sec),'purple','card_reqps') +
+      card('Joins / sec',fmt(r.peers_added_per_sec),'','card_joinps') +
+      card('Memory',fmtBytes(sys.rss_bytes),'red','card_mem') +
+      card('CPU',(sys.cpu_percent||0).toFixed(0)+'%','blue','card_cpu') +
+      card('HTTP conn',fmt(st.http_connections),'','card_httpconns') +
+      card('CQ overflows',fmt(st.cqe_overflow_total), st.cqe_overflow_total>0?'red':'','card_cq');
 
+    // ---- throughput ----
     const pr = r.udp_ipv4||{}, pr6 = r.udp_ipv6||{}, ph = r.http||{};
     $('rates').innerHTML =
       row('Requests / sec', fmt(r.requests_per_sec)) +
-      row('&nbsp;&nbsp;UDP IPv4', `<span class="dim">${fmt(pr.requests_per_sec)} req/s</span>`) +
-      row('&nbsp;&nbsp;UDP IPv6', `<span class="dim">${fmt(pr6.requests_per_sec)} req/s</span>`) +
-      row('&nbsp;&nbsp;HTTP/WS', `<span class="dim">${fmt(ph.requests_per_sec)} req/s</span>`) +
+      sub('UDP IPv4', fmt(pr.requests_per_sec)+' req/s') +
+      sub('UDP IPv6', fmt(pr6.requests_per_sec)+' req/s') +
+      sub('HTTP/WS', fmt(ph.requests_per_sec)+' req/s') +
       row('Bytes in / sec', fmtB(r.bytes_rx_per_sec)) +
+      sub('UDP IPv4', fmtBr(pr.bytes_rx_per_sec)) +
+      sub('UDP IPv6', fmtBr(pr6.bytes_rx_per_sec)) +
+      sub('HTTP/WS', fmtBr(ph.bytes_rx_per_sec)) +
       row('Bytes out / sec', fmtB(r.bytes_tx_per_sec)) +
+      sub('UDP IPv4', fmtBr(pr.bytes_tx_per_sec)) +
+      sub('UDP IPv6', fmtBr(pr6.bytes_tx_per_sec)) +
+      sub('HTTP/WS', fmtBr(ph.bytes_tx_per_sec)) +
       row('Peer joins / sec', fmt(r.peers_added_per_sec)) +
       row('Peer leaves / sec', fmt(r.peers_removed_per_sec)) +
       row('HTTP connections', fmt(st.http_connections)) +
       row('CQ overflows', fmt(st.cqe_overflow_total));
 
-    const proto = (name,p) => p ? row(name,
-      `${fmt(p.requests)} req · ${fmt(p.announces)} ann · ${fmt(p.scrapes)} scr` +
-      ` <span class="dim">[${fmt(p.ev_started||0)}▲ ${fmt(p.ev_completed||0)}● ${fmt(p.ev_stopped||0)}■]</span>` +
-      (p.rate_limited?` · <span style="color:var(--red)">${fmt(p.rate_limited)} limited</span>`:'') +
-      (p.dropped?` · <span style="color:var(--amber)">${fmt(p.dropped)} dropped</span>`:'')
-    ) : '';
-    $('protos').innerHTML =
-      proto('UDP IPv4',(st.udp||{}).ipv4) +
-      proto('UDP IPv6',(st.udp||{}).ipv6) +
-      proto('HTTP / WS',(st.http||{})) +
-      row('BEP-15 errors', fmt(((st.udp||{}).ipv4?.errors||0)+((st.udp||{}).ipv6?.errors||0)+(st.http?.errors||0)));
+    // ---- protocols matrix: rows = metrics, cols = udp4/udp6/http ----
+    const u4 = (st.udp||{}).ipv4 || {}, u6 = (st.udp||{}).ipv6 || {}, hp = st.http || {};
+    const r4 = r.udp_ipv4||{}, r6 = r.udp_ipv6||{}, rh = r.http||{};
+    const P = [u4, u6, hp], R = [r4, r6, rh];
+    const mrows = [
+      ['Requests',          p=>fmt(p.requests),            rr=>fmt(rr.requests_per_sec)],
+      ['Connects',          p=>fmt(p.connects),            null],
+      ['Announces',         p=>fmt(p.announces),           null],
+      ['Scrapes',           p=>fmt(p.scrapes),             null],
+      ['Errors',            p=>fmt(p.errors),              null],
+      ['Bytes received',    p=>fmtBytes(p.bytes_rx),       rr=>fmtBr(rr.bytes_rx_per_sec)],
+      ['Bytes sent',        p=>fmtBytes(p.bytes_tx),       rr=>fmtBr(rr.bytes_tx_per_sec)],
+      ['Dropped',           p=>p.dropped?fmt(p.dropped):'<span class="dim">0</span>', null],
+      ['Rate-limited',      p=>p.rate_limited?`<span style="color:var(--red)">${fmt(p.rate_limited)}</span>`:'<span class="dim">0</span>', null],
+      ['Started events',    p=>fmt(p.ev_started||0),       null],
+      ['Completed events',  p=>fmt(p.ev_completed||0),     null],
+      ['Stopped events',    p=>fmt(p.ev_stopped||0),       null],
+      ['Req / sec',         null,                          rr=>fmt(rr.requests_per_sec)],
+    ];
+    let pt = `<table><thead><tr><th>Metric</th><th class="num">UDP IPv4</th><th class="num">UDP IPv6</th><th class="num">HTTP / WS</th><th class="num">All</th></tr></thead><tbody>`;
+    const statKey = {Requests:'requests',Connects:'connects',Announces:'announces',Scrapes:'scrapes',Errors:'errors','Bytes received':'bytes_rx','Bytes sent':'bytes_tx',Dropped:'dropped','Rate-limited':'rate_limited','Started events':'ev_started','Completed events':'ev_completed','Stopped events':'ev_stopped'};
+    mrows.forEach(([label, gf, gr]) => {
+      const cells = P.map((p,i) => {
+        if (gf && gr) return `<td class="num">${gf(p)}<br><span class="dim">${gr(R[i])}</span></td>`;
+        if (gf) return `<td class="num">${gf(p)}</td>`;
+        return `<td class="num">${gr ? gr(R[i]) : ''}</td>`;
+      });
+      // "All" column: sum of protocol totals (+ combined rate when the row has one)
+      let all = '';
+      const k = statKey[label];
+      if (k) {
+        all = `<b>${fmt((u4[k]||0)+(u6[k]||0)+(hp[k]||0))}</b>` + (gr ? `<br><span class="dim">${gr(r)}</span>` : '');
+      } else if (gr) {
+        all = `<b>${gr(r)}</b>`;
+      }
+      pt += `<tr><td>${label}</td>${cells.join('')}<td class="num">${all}</td></tr>`;
+    });
+    pt += '</tbody></table>';
+    $('protos').innerHTML = pt;
 
-    // ---- system panel ----
+    // ---- system ----
     $('system').innerHTML =
       row('RSS memory', fmtBytes(sys.rss_bytes)) +
       row('Swarm estimate', fmtBytes(sys.swarm_estimate_bytes)) +
-      row('CPU', (sys.cpu_percent||0).toFixed(1)+'%') +
+      row('CPU', (sys.cpu_percent||0).toFixed(1)+'% of machine') +
       row('Uptime', up(st.uptime_seconds)) +
+      row('Version', 'v'+(st.version||'?')) +
       row('Torrents created', fmt(sw.torrents_created_total)) +
       row('Peers added (total)', fmt(sw.peers_added_total)) +
       row('Peers removed (total)', fmt(sw.peers_removed_total)) +
-      row('io_uring CQ overflows', fmt(st.cqe_overflow_total));
+      row('io_uring CQ overflows', fmt(st.cqe_overflow_total)) +
+      row('HTTP connections', fmt(st.http_connections));
 
     // ---- charts ----
     const samples = (ts.samples||[]);
     if (samples.length > 1) {
-      drawChart('g_req', [
+      if (isVisible('chart_req')) drawChart('g_req', [
         {color:'#4f8cff', points: rateSeries(samples, s=>s.udp4_requests)},
         {color:'#a06bff', points: rateSeries(samples, s=>s.udp6_requests)},
         {color:'#3ecf8e',  points: rateSeries(samples, s=>s.http_requests)},
       ], v=>fmt(v));
-      drawChart('g_peers', [
+      if (isVisible('chart_peers')) drawChart('g_peers', [
         {color:'#3ecf8e',  points: gaugeSeries(samples, s=>s.peers)},
         {color:'#f0b44c',  points: gaugeSeries(samples, s=>s.seeders)},
-        {color:'#ef6a6a',    points: gaugeSeries(samples, s=>s.leechers)},
+        {color:'#ef6a6a',  points: gaugeSeries(samples, s=>s.leechers)},
       ], v=>fmt(v));
-      // bandwidth: combine rx+tx per family into in/out
-      const inPts = rateSeries(samples, s=>s.bytes_rx), outPts = rateSeries(samples, s=>s.bytes_tx);
-      const toB = pts => pts.map(p=>[p[0], p[1]]);
-      drawChart('g_bytes', [
-        {color:'#4f8cff', points: toB(inPts)},
-        {color:'#f0b44c',  points: toB(outPts)},
-      ], v=>{ const n=v; return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n.toFixed(0); });
+      if (isVisible('chart_bw')) drawChart('g_bytes', [
+        {color:'#4f8cff', points: rateSeries(samples, s=>s.bytes_rx)},
+        {color:'#f0b44c',  points: rateSeries(samples, s=>s.bytes_tx)},
+      ], yBytes);
+      if (isVisible('chart_bwp')) drawChart('g_bwp', [
+        {color:'#4f8cff', points: rateSeries(samples, s=>s.udp4_bytes_rx+s.udp4_bytes_tx)},
+        {color:'#a06bff', points: rateSeries(samples, s=>s.udp6_bytes_rx+s.udp6_bytes_tx)},
+        {color:'#3ecf8e',  points: rateSeries(samples, s=>s.http_bytes_rx+s.http_bytes_tx)},
+      ], yBytes);
+      if (isVisible('chart_churn')) drawChart('g_churn', [
+        {color:'#3ecf8e', points: rateSeries(samples, s=>s.peers_added)},
+        {color:'#ef6a6a', points: rateSeries(samples, s=>s.peers_removed)},
+      ], v=>fmt(v));
+      if (isVisible('chart_mem')) drawChart('g_mem', [
+        {color:'#ef6a6a',  points: gaugeSeries(samples, s=>s.rss_bytes)},
+        {color:'#a06bff', points: gaugeSeries(samples, s=>s.swarm_bytes||0)},
+      ], v=>v>=1e9?(v/1e9).toFixed(1)+'G':v>=1e6?(v/1e6).toFixed(0)+'M':(v/1e3).toFixed(0)+'K');
+      if (isVisible('chart_cpu')) drawChart('g_cpu', [
+        {color:'#4f8cff', points: gaugeSeries(samples, s=>s.cpu_percent)},
+      ], yPct);
     }
 
+    // ---- torrents ----
     const tlist = (tr.torrents||[]);
+    $('torrentsHint').textContent = tr.total ? `top ${tlist.length} of ${fmtI(tr.total)}` : '';
     $('torrents').innerHTML = tlist.length ? `<table><thead><tr>
       <th>Info hash</th><th class="num">Seeders</th><th class="num">Leechers</th><th class="num">Peers</th>
       </tr></thead><tbody>` + tlist.map(t =>
-      `<tr><td class="hash">${(t.info_hash||'').slice(0,12)}…</td><td class="num">${fmt(t.seeders)}</td>` +
+      `<tr class="clickable" data-h="${esc(t.info_hash)}" title="click for peer list">` +
+      `<td class="hash">${esc((t.info_hash||'').slice(0,12))}…</td><td class="num">${fmt(t.seeders)}</td>` +
       `<td class="num">${fmt(t.leechers)}</td><td class="num">${fmt(t.peers)}</td></tr>`).join('') +
       `</tbody></table>` : '<div class="empty">No torrents</div>';
+    document.querySelectorAll('#torrents tr.clickable').forEach(tr_ =>
+      tr_.addEventListener('click', () => openTorrent(tr_.dataset.h)));
 
-    const cs = (st.top_clients||[]);
+    // ---- clients ----
+    const cs = (cl.clients||st.top_clients||[]);
+    $('clientsHint').textContent = cs.length ? `${cs.length} shown` : '';
     $('clients').innerHTML = cs.length ? `<table><thead><tr>
       <th>Client</th><th class="num">Announces</th></tr></thead><tbody>` + cs.map(c =>
-      `<tr><td class="client">${c.client||'unknown'}</td><td class="num">${fmt(c.announces)}</td></tr>`).join('') +
+      `<tr><td class="client">${esc(c.client)||'unknown'}</td><td class="num">${fmt(c.announces)}</td></tr>`).join('') +
       `</tbody></table>` : '<div class="empty">No client data</div>';
+
+    // ---- raw viewers ----
+    renderRaw();
+
+    applyWidgets();
   } catch(e) {
     $('upd').textContent = 'update failed — retrying';
   }
 }
+
+function jsonHighlight(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*")(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(\.\d+)?([eE][+-]?\d+)?/g, m => {
+      let cls = 'n';
+      if (/^"/.test(m)) cls = /:$/.test(m) ? 'k' : 's';
+      else if (/true|false|null/.test(m)) cls = 'b';
+      return `<span class="${cls}">${m}</span>`;
+    });
+}
+
 tick();
 setInterval(tick, 3000);
 </script>

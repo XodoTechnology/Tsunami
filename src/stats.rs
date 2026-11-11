@@ -107,6 +107,8 @@ pub struct GaugeInput {
     pub seeders: u64,
     pub leechers: u64,
     pub rss_bytes: u64,
+    /// Estimated swarm-store heap bytes.
+    pub swarm_bytes: u64,
     /// CPU utilisation in percent * 10 (one decimal) since last sample.
     pub cpu_percent_x10: u64,
 }
@@ -141,6 +143,7 @@ pub struct RateSample {
     pub peers_removed: u64,
     // System gauges.
     pub rss_bytes: u64,
+    pub swarm_bytes: u64,
     pub cpu_percent_x10: u64,
 }
 
@@ -247,6 +250,7 @@ impl Stats {
             peers_added: self.peers_added.load(Ordering::Relaxed),
             peers_removed: self.peers_removed.load(Ordering::Relaxed),
             rss_bytes: gauges.rss_bytes,
+            swarm_bytes: gauges.swarm_bytes,
             cpu_percent_x10: gauges.cpu_percent_x10,
         };
         let mut q = self.rate_samples.lock().unwrap();
@@ -426,6 +430,7 @@ impl Stats {
                         "peers_added": s.peers_added,
                         "peers_removed": s.peers_removed,
                         "rss_bytes": s.rss_bytes,
+                        "swarm_bytes": s.swarm_bytes,
                         "cpu_percent": s.cpu_percent_x10 as f64 / 10.0,
                     })
                 })
