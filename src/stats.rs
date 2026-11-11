@@ -94,6 +94,9 @@ pub struct Stats {
     pub peers_removed: AtomicU64,
     /// Active HTTP connections.
     pub http_connections: AtomicU64,
+    /// io_uring completions dropped due to CQ-ring overflow (UDP backend).
+    /// Each drop can leak a provided-buffer id; the worker rebuilds the ring.
+    pub cqe_overflow: AtomicU64,
     pub client_stats: ClientStats,
     /// Ring of per-second cumulative-counter samples feeding windowed rates.
     /// Fed by a dedicated sampler thread so every consumer (/api/stats,
@@ -128,6 +131,7 @@ impl Stats {
             peers_added: AtomicU64::new(0),
             peers_removed: AtomicU64::new(0),
             http_connections: AtomicU64::new(0),
+            cqe_overflow: AtomicU64::new(0),
             client_stats: ClientStats::new(),
             rate_samples: Mutex::new(VecDeque::with_capacity(
                 (RATE_RING_MS / RATE_SAMPLE_MS) as usize + 2,
@@ -202,6 +206,7 @@ impl Stats {
                 "torrents_created_total": torrents_created,
             },
             "http_connections": self.http_connections.load(Ordering::Relaxed),
+            "cqe_overflow_total": self.cqe_overflow.load(Ordering::Relaxed),
             "top_clients": client_list,
         })
     }
@@ -281,6 +286,8 @@ impl Stats {
         s.push_str(&format!("tsunami_bytes_tx_per_second {tx_rate}\n"));
         s.push_str("# HELP tsunami_http_connections Active HTTP connections\n# TYPE tsunami_http_connections gauge\n");
         s.push_str(&format!("tsunami_http_connections {}\n", self.http_connections.load(Ordering::Relaxed)));
+        s.push_str("# HELP tsunami_cqe_overflow_total io_uring completions dropped on CQ overflow\n# TYPE tsunami_cqe_overflow_total counter\n");
+        s.push_str(&format!("tsunami_cqe_overflow_total {}\n", self.cqe_overflow.load(Ordering::Relaxed)));
         for (name, p, family) in [
             ("udp_ipv4", &self.udp_ipv4, "4"),
             ("udp_ipv6", &self.udp_ipv6, "6"),

@@ -77,22 +77,42 @@ cargo build --release
 See `tsunami.toml.example` for all options. Key knobs for large deployments:
 
 - `network.socket_workers` — one io_uring + socket pair per worker; default = CPUs.
-- `network.ring_size` — io_uring entries **and** provided RX buffers per worker.
-  Each buffer is 2 KiB; 4096 → 8 MiB RX + ~17 MiB TX pool per worker.
+- `network.ring_size` — io_uring **submission** entries per worker. The
+  completion queue and provided RX-buffer ring are sized automatically from
+  it (CQ ≈ 16× entries, clamped 16–64K; RX buffers ≈ 4× entries, clamped
+  2–16K × 2 KiB each), so a bigger `ring_size` mostly means more in-flight
+  sends, not proportionally more memory. Tune the CQ directly with the
+  `TSUNAMI_CQ_SIZE` env var (power of two) if you need to.
 - `network.swarm_shards` — power of two; more shards = less lock contention.
 - `protocol.store_peer_id` — costs ~30–50 B/peer extra; only enable if you
   need `compact=0` peer_id echo or per-peer client detail.
 - `protocol.client_stats` — per-client announce counters (cheap, striped).
 
+### CQ-overflow self-healing (io_uring backend)
+
+If a completion-queue overflow ever drops recv CQEs, the kernel can leak
+provided-buffer ids and stall UDP RX. Tsunami detects this via the CQ
+overflow counter and automatically rebuilds the RX buffer ring: it cancels
+the multishot `recvmsg`s, drains their terminal completions, unregisters +
+re-registers a fresh ring, and resubmits — no restart needed. Watch the
+`cqe_overflow_total` counter / `tsunami_cqe_overflow_total` metric (and the
+`udp worker: io_uring completion queue overflow` / `RX buffer ring rebuilt`
+log lines) to see it happen. `TSUNAMI_DEBUG_REBUILD=1` forces the path once
+at startup for testing on new kernels.
+
 ### 50M-peer sizing (rough)
 
 - Peer storage: ~45 B/peer (v4) → ~2.3 GiB; ~80 B/peer with `store_peer_id`.
-- I/O buffers: `ring_size × workers × ~25 KiB` — e.g. 8 workers × 4096 ≈ 800 MiB.
+- I/O buffers: RX ring is clamped to ≤16K × 2 KiB (≤32 MiB) and the send
+  pool to ≤8K buffers **per worker** regardless of `ring_size`, so e.g.
+  8 workers stays ≈ 300 MiB worst-case; the CQ is ≤64K × 16 B (≤1 MiB).
 - Announce rate needed at 30-min intervals: ~28K/s average — far below the
   ~500K+/s sustained UDP throughput measured on an 8-core box.
 - Recommend: `socket_workers = #cores`, `ring_size = 4096–8192`,
   `socket_recv_buffer = 16–64 MiB`, `swarm_shards = 256+`,
-  `store_peer_id = false` unless required.
+  `store_peer_id = false` unless required. Under overload the kernel sheds
+  excess packets with `ENOBUFS` (counted in `dropped`) rather than losing
+  completions — that's expected backpressure, not a fault.
 
 ## Load generator
 

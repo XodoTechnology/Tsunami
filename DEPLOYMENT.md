@@ -31,6 +31,18 @@ below is opt-in.
 Multishot `recvmsg` on a normal UDP socket with registered buffer rings and
 pooled `sendmsg`. This is the right choice unless you see burst loss.
 
+**CQ-overflow resilience:** the completion queue is sized ~16× the SQ
+entries (16–64K, tunable via `TSUNAMI_CQ_SIZE`) and the RX buffer ring is
+sized independently of the send pool, so under overload the kernel sheds
+excess packets with `ENOBUFS` (counted in `dropped`) *before* completions
+can be lost. If a CQ overflow still occurs, Tsunami detects it and rebuilds
+the RX buffer ring in place (cancel multishot → drain → re-register →
+resubmit) — no restart. Monitor `cqe_overflow_total` /
+`tsunami_cqe_overflow_total`; sustained non-zero growth means you're
+regularly overflowing and should raise `TSUNAMI_CQ_SIZE` or switch to
+`af_packet`. `TSUNAMI_DEBUG_REBUILD=1` forces one rebuild at startup to
+validate the path on a new kernel.
+
 ### `af_packet` — lower burst loss, higher CPU
 
 `PACKET_RX_RING` kernel packet-mmap ring + `PACKET_FANOUT_HASH` fan-out
@@ -239,6 +251,7 @@ swarm address on top of it.
 | `socket_workers` | = allocated vCPUs | = physical cores (mind NUMA) |
 | `socket_recv_buffer` | 16–32 MiB | 32–64 MiB |
 | `ring_size` | 2048–4096 | 4096–8192 |
+| `TSUNAMI_CQ_SIZE` | leave default (auto ~16×) | raise to 32768–65536 under sustained flood |
 | `swarm_shards` | 128–256 | 256+ |
 | `snapshot.interval_secs` | 300 | 60–300 |
 | `ratelimit.*` | set per expected load | set per expected load |

@@ -14,10 +14,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use io_uring::opcode::RecvMsgMulti;
-use io_uring::types::Fixed;
+use io_uring::opcode::{AsyncCancel2, RecvMsgMulti};
+use io_uring::types::{CancelBuilder, Fixed};
 use io_uring::IoUring;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -34,7 +35,13 @@ use self::validator::Validator;
 const REQUEST_BUF_LEN: usize = 2048;
 const USER_DATA_RECV_V4: u64 = u64::MAX;
 const USER_DATA_RECV_V6: u64 = u64::MAX - 1;
+const USER_DATA_CANCEL_V4: u64 = u64::MAX - 2;
+const USER_DATA_CANCEL_V6: u64 = u64::MAX - 3;
 const PENDING_SEND_MAX: usize = 8192;
+/// How long to wait for recv multishots to report termination during a
+/// buffer-ring rebuild before resubmitting cancels (guards against a
+/// terminal CQE being lost to a further overflow).
+const RECV_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Per-worker local counters, flushed to the shared atomics once per loop
 /// iteration — avoids cacheline contention between workers.
@@ -198,6 +205,21 @@ pub struct Worker {
     local_v4: LocalStats,
     local_v6: LocalStats,
     rl: crate::ratelimit::RateLimiter,
+    // --- provided-buffer-ring overflow recovery ---
+    /// Whether each family's multishot recvmsg is currently armed.
+    recv_live_v4: bool,
+    recv_live_v6: bool,
+    /// Recovery in progress: recvs cancelled, waiting for terminal CQEs.
+    recv_draining: bool,
+    /// bit0 = v4, bit1 = v6 — recvs still awaiting a terminal CQE.
+    drain_mask: u8,
+    drain_since: Instant,
+    /// Kernel-dropped CQEs observed since last flush (unflushed delta).
+    cqe_overflow_pending: u64,
+    last_cq_overflow: u32,
+    /// Provided-buffer ring geometry, retained so a rebuild matches the
+    /// original allocation (bgid + entry count + buffer length).
+    buf_ring_entries: u16,
     _sockets: Vec<socket2::Socket>,
 }
 
@@ -260,14 +282,30 @@ impl Worker {
             let is_v4 = ud == USER_DATA_RECV_V4;
             self.handle_recv_cqe(&cqe, is_v4);
             if !io_uring::cqueue::more(cqe.flags()) {
-                let sqe = if is_v4 {
+                // The multishot recv terminated (error or our cancel).
+                let live = if is_v4 {
+                    &mut self.recv_live_v4
+                } else {
+                    &mut self.recv_live_v6
+                };
+                *live = false;
+                if self.recv_draining {
+                    // Terminal CQE observed: this family's recv is drained.
+                    self.drain_mask &= if is_v4 { !1 } else { !2 };
+                } else if let Some(s) = if is_v4 {
                     self.recv_sqe_v4.clone()
                 } else {
                     self.recv_sqe_v6.clone()
-                };
-                if let Some(s) = sqe {
+                } {
                     rearm.push(s);
+                    *live = true;
                 }
+            }
+        } else if ud == USER_DATA_CANCEL_V4 || ud == USER_DATA_CANCEL_V6 {
+            // AsyncCancel completion. -ENOENT means nothing was armed to
+            // cancel, i.e. that family's recv had already terminated.
+            if self.recv_draining && cqe.result() == -libc::ENOENT {
+                self.drain_mask &= if ud == USER_DATA_CANCEL_V4 { !1 } else { !2 };
             }
         } else {
             // sendmsg completion: user_data = buffer index | SEND_V6 flag
@@ -291,7 +329,8 @@ impl Worker {
         if res < 0 {
             if -res == libc::ENOBUFS {
                 log::warn!("recvmsg: provided buffers exhausted");
-            } else {
+            } else if -res != libc::ECANCELED {
+                // ECANCELED is expected while rebuilding the buffer ring.
                 log::warn!("recvmsg failed: {}", std::io::Error::from_raw_os_error(-res));
             }
             return;
@@ -470,8 +509,145 @@ impl Worker {
         }
     }
 
+    /// Build an AsyncCancel SQE targeting one family's recv multishot.
+    fn cancel_sqe(is_v4: bool) -> io_uring::squeue::Entry {
+        if is_v4 {
+            AsyncCancel2::new(CancelBuilder::user_data(USER_DATA_RECV_V4))
+                .build()
+                .user_data(USER_DATA_CANCEL_V4)
+        } else {
+            AsyncCancel2::new(CancelBuilder::user_data(USER_DATA_RECV_V6))
+                .build()
+                .user_data(USER_DATA_CANCEL_V6)
+        }
+    }
+
+    /// Check the kernel CQ-overflow counter. New drops mean recvmsg CQEs were
+    /// lost, leaking provided-buffer ids — begin draining the multishots so
+    /// the ring can be rebuilt. Also maintains the drain (retries cancels if
+    /// a terminal CQE was itself lost to a further overflow).
+    fn poll_overflow(
+        &mut self,
+        ring: &mut IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry>,
+        rearm: &mut Vec<io_uring::squeue::Entry>,
+    ) {
+        let ov = ring.completion().overflow();
+        if ov != self.last_cq_overflow {
+            let lost = ov.wrapping_sub(self.last_cq_overflow);
+            self.last_cq_overflow = ov;
+            self.cqe_overflow_pending += lost as u64;
+            if !self.recv_draining {
+                // rearm only ever holds recv resubmit SQEs; drop them so a
+                // resubmit can't race the cancels — recvs are resubmitted
+                // fresh after the rebuild regardless.
+                rearm.clear();
+                self.recv_draining = true;
+                self.drain_mask = 0;
+                self.drain_since = Instant::now();
+                log::warn!(
+                    "udp worker: io_uring completion queue overflow \
+                     ({lost} completions lost); rebuilding RX buffer ring"
+                );
+                if self.recv_live_v4 {
+                    self.drain_mask |= 1;
+                    rearm.push(Self::cancel_sqe(true));
+                }
+                if self.recv_live_v6 {
+                    self.drain_mask |= 2;
+                    rearm.push(Self::cancel_sqe(false));
+                }
+            }
+        }
+        // Drain maintenance: if terminal CQEs were lost to further overflow,
+        // resubmit the (idempotent) cancels periodically until they land.
+        if self.recv_draining
+            && self.drain_mask != 0
+            && self.drain_since.elapsed() > RECV_DRAIN_TIMEOUT
+        {
+            self.drain_since = Instant::now();
+            if self.recv_live_v4 {
+                rearm.push(Self::cancel_sqe(true));
+            }
+            if self.recv_live_v6 {
+                rearm.push(Self::cancel_sqe(false));
+            }
+            log::warn!("udp worker: RX ring rebuild drain timed out; retrying cancel");
+        }
+    }
+
+    /// Once every recv multishot has reported termination, swap in a freshly
+    /// registered provided-buffer ring (kernel head/tail reset) and resubmit
+    /// the recv SQEs. Retried each iteration until it succeeds.
+    fn maybe_finish_rebuild(
+        &mut self,
+        ring: &mut IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry>,
+    ) {
+        if !self.recv_draining || self.drain_mask != 0 {
+            return;
+        }
+        let bgid = self.buf_ring.bgid();
+        let entries = self.buf_ring_entries;
+        // Detach the leaked ring, then register a fresh one under the same
+        // bgid. With all recvs terminated there are no armed references to
+        // bgid, so this is safe; the old allocation is freed via Rc once its
+        // last RecvBuf drains.
+        if let Err(e) = ring.submitter().unregister_buf_ring(bgid) {
+            log::warn!("unregister_buf_ring({bgid}): {e}");
+        }
+        let new_ring = match BufRing::new(bgid, entries, REQUEST_BUF_LEN) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("RX ring rebuild alloc failed: {e}");
+                return; // stay draining; retried next iteration
+            }
+        };
+        // Safety: new_ring is owned by this worker and outlives registration.
+        if let Err(e) = unsafe { new_ring.register(&ring.submitter()) } {
+            log::error!("RX ring rebuild register failed: {e}");
+            return;
+        }
+        self.buf_ring = new_ring;
+        // Resubmit the recv multishots onto the fresh ring.
+        {
+            let mut sq = ring.submission();
+            if let Some(e) = &self.recv_sqe_v4 {
+                if unsafe { sq.push(e) }.is_err() {
+                    log::error!("rebuild: SQ full submitting recv v4");
+                }
+            }
+            if let Some(e) = &self.recv_sqe_v6 {
+                if unsafe { sq.push(e) }.is_err() {
+                    log::error!("rebuild: SQ full submitting recv v6");
+                }
+            }
+        }
+        if let Err(e) = ring.submitter().submit() {
+            log::error!("rebuild submit failed: {e}");
+        }
+        self.recv_draining = false;
+        self.recv_live_v4 = self.recv_sqe_v4.is_some();
+        self.recv_live_v6 = self.recv_sqe_v6.is_some();
+        log::info!("udp worker: RX buffer ring rebuilt after CQ overflow");
+    }
+
     fn run_inner(&mut self, ring: &mut IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry>) {
         let mut rearm: Vec<io_uring::squeue::Entry> = Vec::new();
+        // Debug/testing hook: force one RX-ring rebuild through the real
+        // cancel->drain->re-register path (off unless TSUNAMI_DEBUG_REBUILD set).
+        if std::env::var_os("TSUNAMI_DEBUG_REBUILD").is_some() {
+            self.recv_draining = true;
+            self.drain_mask = 0;
+            self.drain_since = Instant::now();
+            if self.recv_live_v4 {
+                self.drain_mask |= 1;
+                rearm.push(Self::cancel_sqe(true));
+            }
+            if self.recv_live_v6 {
+                self.drain_mask |= 2;
+                rearm.push(Self::cancel_sqe(false));
+            }
+            log::warn!("TSUNAMI_DEBUG_REBUILD: forcing RX buffer-ring rebuild");
+        }
         loop {
             {
                 let mut sq = ring.submission();
@@ -504,10 +680,19 @@ impl Worker {
                 self.handle_cqe(cqe, &mut rearm);
             }
 
+            // Provided-buffer-ring overflow detection + recovery.
+            self.poll_overflow(ring, &mut rearm);
+            self.maybe_finish_rebuild(ring);
             let stats_v4 = &self.stats;
             self.local_v4.flush_into(&stats_v4.udp_ipv4, stats_v4);
             self.local_v6.flush_into(&stats_v4.udp_ipv6, stats_v4);
             self.send_buffers.reset_likely_next();
+            if self.cqe_overflow_pending > 0 {
+                stats_v4
+                    .cqe_overflow
+                    .fetch_add(self.cqe_overflow_pending, Ordering::Relaxed);
+                self.cqe_overflow_pending = 0;
+            }
             // refresh the shared-clock timestamp once per iteration
             self.now_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -586,7 +771,22 @@ fn worker_main(
     validator: Validator,
 ) -> anyhow::Result<()> {
     let ring_entries = config.network.ring_size.max(64).next_power_of_two() as usize;
-    let send_capacity = ring_entries;
+    // Larger CQ headroom so completion bursts don't overflow the ring and
+    // drop recvmsg CQEs (which would leak provided-buffer ids). CQEs are
+    // ~16B, so a big CQ is cheap insurance. TSUNAMI_CQ_SIZE overrides (pow2).
+    let cq_entries = std::env::var("TSUNAMI_CQ_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 64)
+        .map(|n| n.next_power_of_two())
+        .unwrap_or_else(|| (ring_entries.saturating_mul(16)).clamp(16384, 65536));
+    // More provided RX buffers than SQ slots so the kernel can absorb bursts
+    // before ENOBUFS-shedding; each is REQUEST_BUF_LEN bytes.
+    let buf_ring_entries =
+        (ring_entries.saturating_mul(4)).clamp(2048, 16384).next_power_of_two() as u16;
+    // Bound the send pool independently — PENDING_SEND_MAX caps in-flight
+    // sends anyway, so a huge ring_size shouldn't multiply send memory.
+    let send_capacity = ring_entries.min(PENDING_SEND_MAX);
 
     let sock_v4 = if config.network.use_ipv4 {
         Some(create_socket(
@@ -607,6 +807,7 @@ fn worker_main(
         .setup_coop_taskrun()
         .setup_single_issuer()
         .setup_submit_all()
+        .setup_cqsize(cq_entries as u32)
         .build(ring_entries as u32)?;
 
     ring.submitter().register_files(&[
@@ -614,7 +815,7 @@ fn worker_main(
         sock_v6.as_ref().map(|s| s.as_raw_fd()).unwrap_or(-1),
     ])?;
 
-    let buf_ring = BufRing::new(0, ring_entries as u16, REQUEST_BUF_LEN)?;
+    let buf_ring = BufRing::new(0, buf_ring_entries, REQUEST_BUF_LEN)?;
     // Safety: buf_ring memory is owned by this worker and outlives the ring.
     unsafe { buf_ring.register(&ring.submitter()) }?;
 
@@ -638,6 +839,8 @@ fn worker_main(
         config.ratelimit.burst,
     );
 
+    let live_v4 = recv_sqe_v4.is_some();
+    let live_v6 = recv_sqe_v6.is_some();
     let mut worker = Worker {
         config,
         store,
@@ -661,6 +864,14 @@ fn worker_main(
         local_v4: LocalStats::default(),
         local_v6: LocalStats::default(),
         rl,
+        recv_live_v4: live_v4,
+        recv_live_v6: live_v6,
+        recv_draining: false,
+        drain_mask: 0,
+        drain_since: Instant::now(),
+        cqe_overflow_pending: 0,
+        last_cq_overflow: 0,
+        buf_ring_entries,
         _sockets: sock_v4
             .into_iter()
             .chain(sock_v6.into_iter())
