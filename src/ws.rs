@@ -289,6 +289,10 @@ pub(crate) fn dispatch(
                 stats.http.errors.fetch_add(1, Ordering::Relaxed);
                 return Some(err_resp(req.transaction_id, "info hash not allowed"));
             }
+            if protocol::synthetic_peer_id(&req.peer_id) {
+                stats.http.errors.fetch_add(1, Ordering::Relaxed);
+                return Some(err_resp(req.transaction_id, "invalid peer_id"));
+            }
             stats.http.announces.fetch_add(1, Ordering::Relaxed);
             // WS clients may not have a UDP port; fall back to the TCP
             // remote port so the peer key stays unique per connection.

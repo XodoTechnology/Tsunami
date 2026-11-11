@@ -721,6 +721,9 @@ fn announce_http(
     if !access_list.allows(&info_hash) {
         return (403, "text/plain", b"info hash not allowed".to_vec());
     }
+    if crate::protocol::synthetic_peer_id(&peer_id) {
+        return (400, "text/plain", b"invalid peer_id".to_vec());
+    }
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

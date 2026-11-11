@@ -635,6 +635,9 @@ pub fn process_packet(
             } else if !access_list.allows(&info_hash) {
                 local.errors.fetch_add(1, Ordering::Relaxed);
                 protocol::write_error_response(out, req.transaction_id, "info hash not allowed")
+            } else if protocol::synthetic_peer_id(&req.peer_id) {
+                local.errors.fetch_add(1, Ordering::Relaxed);
+                protocol::write_error_response(out, req.transaction_id, "invalid peer_id")
             } else {
                 if !rl.allow_announce() {
                     local.rate_limited.fetch_add(1, Ordering::Relaxed);

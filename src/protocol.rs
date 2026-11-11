@@ -62,6 +62,15 @@ pub struct AnnounceRequest {
     pub ip_field: [u8; 4],
 }
 
+/// peer_ids consisting solely of ASCII digits are synthetic flood signatures
+/// (observed in the wild: "01234567890123456789" announce spam). No real
+/// client generates an all-digit peer_id — BEP-20 ids are structured
+/// (`-XXvvvv-`, `M-x-y--`) or random bytes.
+#[inline]
+pub fn synthetic_peer_id(peer_id: &[u8; 20]) -> bool {
+    peer_id.iter().all(|b| b.is_ascii_digit())
+}
+
 /// Outcome of parsing a datagram.
 #[derive(Debug)]
 pub enum ParsedRequest<'a> {
