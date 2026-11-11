@@ -574,6 +574,9 @@ pub struct PeerSnap {
     pub valid_until: u32,
 }
 
+/// Per-family totals: ((torrents, peers, seeders, leechers) v4, same v6).
+pub type FamilyTotals = ((u64, u64, u64, u64), (u64, u64, u64, u64));
+
 // ---------------------------------------------------------------------------
 // FamilyStore: sharded map of infohash -> swarm, per IP family
 // ---------------------------------------------------------------------------
@@ -1064,6 +1067,13 @@ impl Store {
         let (t4, p4, s4, l4) = self.v4.totals();
         let (t6, p6, s6, l6) = self.v6.totals();
         (t4 + t6, p4 + p6, s4 + s6, l4 + l6)
+    }
+
+    /// Totals split by IP family: (v4 tuple, v6 tuple). Each tuple is
+    /// (torrents, peers, seeders, leechers). Note torrents are counted
+    /// per family store, so a dual-stack torrent appears in both.
+    pub fn totals_by_family(&self) -> FamilyTotals {
+        (self.v4.totals(), self.v6.totals())
     }
 
     /// Rough estimate of swarm-store heap bytes: dense peer slots + per-peer

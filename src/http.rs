@@ -281,7 +281,7 @@ fn route(
             "application/json",
             stats
                 .snapshot_json(
-                    store.totals(),
+                    store.totals_by_family(),
                     store.torrents_created_total(),
                     store.memory_estimate_bytes(),
                     VERSION,
@@ -296,7 +296,7 @@ fn route(
             "text/csv; charset=utf-8",
             stats
                 .stats_csv(
-                    store.totals(),
+                    store.totals_by_family(),
                     store.torrents_created_total(),
                     store.memory_estimate_bytes(),
                     VERSION,
@@ -308,7 +308,7 @@ fn route(
             "text/plain; charset=utf-8",
             stats
                 .stats_txt(
-                    store.totals(),
+                    store.totals_by_family(),
                     store.torrents_created_total(),
                     store.memory_estimate_bytes(),
                     VERSION,
@@ -320,7 +320,7 @@ fn route(
             "text/plain; version=0.0.4",
             stats
                 .prometheus_text(
-                    store.totals(),
+                    store.totals_by_family(),
                     store.torrents_created_total(),
                     store.memory_estimate_bytes(),
                     VERSION,

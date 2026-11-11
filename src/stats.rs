@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::swarm::FamilyTotals;
+
 #[derive(Default)]
 pub struct ProtoStats {
     pub requests: AtomicU64,
@@ -133,6 +135,21 @@ pub struct RateSample {
     pub udp4_bytes_tx: u64,
     pub udp6_bytes_tx: u64,
     pub http_bytes_tx: u64,
+    // Per-protocol cumulative action counters (for per-second action rates:
+    // announces/connects/scrapes/errors — what external stats consumers need
+    // to match classic tracker stat pages).
+    pub udp4_announces: u64,
+    pub udp4_connects: u64,
+    pub udp4_scrapes: u64,
+    pub udp4_errors: u64,
+    pub udp6_announces: u64,
+    pub udp6_connects: u64,
+    pub udp6_scrapes: u64,
+    pub udp6_errors: u64,
+    pub http_announces: u64,
+    pub http_connects: u64,
+    pub http_scrapes: u64,
+    pub http_errors: u64,
     // Swarm gauges (instantaneous).
     pub torrents: u64,
     pub peers: u64,
@@ -180,12 +197,16 @@ pub struct Stats {
     rate_samples: Mutex<VecDeque<RateSample>>,
 }
 
-/// Per-protocol rate triple.
+/// Per-protocol rate set.
 #[derive(Clone, Copy, Default)]
 pub struct ProtoRate {
     pub requests_per_sec: u64,
     pub bytes_rx_per_sec: u64,
     pub bytes_tx_per_sec: u64,
+    pub announces_per_sec: u64,
+    pub connects_per_sec: u64,
+    pub scrapes_per_sec: u64,
+    pub errors_per_sec: u64,
 }
 
 /// Windowed rates over a fixed trailing window, combined + per-protocol.
@@ -243,6 +264,18 @@ impl Stats {
             udp4_bytes_tx: self.udp_ipv4.bytes_tx.load(Ordering::Relaxed),
             udp6_bytes_tx: self.udp_ipv6.bytes_tx.load(Ordering::Relaxed),
             http_bytes_tx: self.http.bytes_tx.load(Ordering::Relaxed),
+            udp4_announces: self.udp_ipv4.announces.load(Ordering::Relaxed),
+            udp4_connects: self.udp_ipv4.connects.load(Ordering::Relaxed),
+            udp4_scrapes: self.udp_ipv4.scrapes.load(Ordering::Relaxed),
+            udp4_errors: self.udp_ipv4.errors.load(Ordering::Relaxed),
+            udp6_announces: self.udp_ipv6.announces.load(Ordering::Relaxed),
+            udp6_connects: self.udp_ipv6.connects.load(Ordering::Relaxed),
+            udp6_scrapes: self.udp_ipv6.scrapes.load(Ordering::Relaxed),
+            udp6_errors: self.udp_ipv6.errors.load(Ordering::Relaxed),
+            http_announces: self.http.announces.load(Ordering::Relaxed),
+            http_connects: self.http.connects.load(Ordering::Relaxed),
+            http_scrapes: self.http.scrapes.load(Ordering::Relaxed),
+            http_errors: self.http.errors.load(Ordering::Relaxed),
             torrents: gauges.torrents,
             peers: gauges.peers,
             seeders: gauges.seeders,
@@ -314,6 +347,34 @@ impl Stats {
             Some(b) => (b.udp4_bytes_tx, b.udp6_bytes_tx, b.http_bytes_tx),
             None => (0, 0, 0),
         };
+        // Action counters: (announces, connects, scrapes, errors) per proto.
+        let (u4an, u4cn, u4sn, u4en) = match base {
+            Some(b) => (
+                b.udp4_announces,
+                b.udp4_connects,
+                b.udp4_scrapes,
+                b.udp4_errors,
+            ),
+            None => (0, 0, 0, 0),
+        };
+        let (u6an, u6cn, u6sn, u6en) = match base {
+            Some(b) => (
+                b.udp6_announces,
+                b.udp6_connects,
+                b.udp6_scrapes,
+                b.udp6_errors,
+            ),
+            None => (0, 0, 0, 0),
+        };
+        let (han, hcn, hsn, hen) = match base {
+            Some(b) => (
+                b.http_announces,
+                b.http_connects,
+                b.http_scrapes,
+                b.http_errors,
+            ),
+            None => (0, 0, 0, 0),
+        };
 
         Rates {
             requests_per_sec: per(self.total_requests(), b_req),
@@ -323,16 +384,28 @@ impl Stats {
                 requests_per_sec: per(self.udp_ipv4.requests.load(Ordering::Relaxed), u4r),
                 bytes_rx_per_sec: per(self.udp_ipv4.bytes_rx.load(Ordering::Relaxed), u4rx),
                 bytes_tx_per_sec: per(self.udp_ipv4.bytes_tx.load(Ordering::Relaxed), u4tx),
+                announces_per_sec: per(self.udp_ipv4.announces.load(Ordering::Relaxed), u4an),
+                connects_per_sec: per(self.udp_ipv4.connects.load(Ordering::Relaxed), u4cn),
+                scrapes_per_sec: per(self.udp_ipv4.scrapes.load(Ordering::Relaxed), u4sn),
+                errors_per_sec: per(self.udp_ipv4.errors.load(Ordering::Relaxed), u4en),
             },
             udp6: ProtoRate {
                 requests_per_sec: per(self.udp_ipv6.requests.load(Ordering::Relaxed), u6r),
                 bytes_rx_per_sec: per(self.udp_ipv6.bytes_rx.load(Ordering::Relaxed), u6rx),
                 bytes_tx_per_sec: per(self.udp_ipv6.bytes_tx.load(Ordering::Relaxed), u6tx),
+                announces_per_sec: per(self.udp_ipv6.announces.load(Ordering::Relaxed), u6an),
+                connects_per_sec: per(self.udp_ipv6.connects.load(Ordering::Relaxed), u6cn),
+                scrapes_per_sec: per(self.udp_ipv6.scrapes.load(Ordering::Relaxed), u6sn),
+                errors_per_sec: per(self.udp_ipv6.errors.load(Ordering::Relaxed), u6en),
             },
             http: ProtoRate {
                 requests_per_sec: per(self.http.requests.load(Ordering::Relaxed), hr),
                 bytes_rx_per_sec: per(self.http.bytes_rx.load(Ordering::Relaxed), hrx),
                 bytes_tx_per_sec: per(self.http.bytes_tx.load(Ordering::Relaxed), htx),
+                announces_per_sec: per(self.http.announces.load(Ordering::Relaxed), han),
+                connects_per_sec: per(self.http.connects.load(Ordering::Relaxed), hcn),
+                scrapes_per_sec: per(self.http.scrapes.load(Ordering::Relaxed), hsn),
+                errors_per_sec: per(self.http.errors.load(Ordering::Relaxed), hen),
             },
             peers_added_per_sec: per(self.peers_added.load(Ordering::Relaxed), b_padd),
             peers_removed_per_sec: per(self.peers_removed.load(Ordering::Relaxed), b_prem),
@@ -340,17 +413,19 @@ impl Stats {
     }
 
     /// JSON-serializable snapshot for /api/stats.
-    /// `store_totals` = (torrents, peers, seeders, leechers);
+    /// `family_totals` = per-IP-family (torrents, peers, seeders, leechers);
     /// `swarm_bytes` = estimated swarm-store memory.
     pub fn snapshot_json(
         &self,
-        store_totals: (u64, u64, u64, u64),
+        family_totals: FamilyTotals,
         torrents_created: u64,
         swarm_bytes: u64,
         version: &str,
     ) -> serde_json::Value {
         let uptime = self.started.elapsed().as_secs();
-        let (torrents, peers, seeders, leechers) = store_totals;
+        let ((t4, p4, s4, l4), (t6, p6, s6, l6)) = family_totals;
+        let (torrents, peers, seeders, leechers) =
+            (t4 + t6, p4 + p6, s4 + s6, l4 + l6);
         let rates = self.compute_rates();
 
         let clients = self.client_stats.top(20);
@@ -385,6 +460,8 @@ impl Stats {
                 "peers": peers,
                 "seeders": seeders,
                 "leechers": leechers,
+                "ipv4": { "torrents": t4, "peers": p4, "seeders": s4, "leechers": l4 },
+                "ipv6": { "torrents": t6, "peers": p6, "seeders": s6, "leechers": l6 },
                 "peers_added_total": self.peers_added.load(Ordering::Relaxed),
                 "peers_removed_total": self.peers_removed.load(Ordering::Relaxed),
                 "torrents_created_total": torrents_created,
@@ -444,13 +521,15 @@ impl Stats {
     /// Non-scalar data (top_clients, per-torrent lists) has its own endpoints.
     fn flat_stats(
         &self,
-        store_totals: (u64, u64, u64, u64),
+        family_totals: FamilyTotals,
         torrents_created: u64,
         swarm_bytes: u64,
         version: &str,
     ) -> Vec<(String, String)> {
         let uptime = self.started.elapsed().as_secs();
-        let (torrents, peers, seeders, leechers) = store_totals;
+        let ((t4, p4, s4, l4), (t6, p6, s6, l6)) = family_totals;
+        let (torrents, peers, seeders, leechers) =
+            (t4 + t6, p4 + p6, s4 + s6, l4 + l6);
         let rates = self.compute_rates();
         let mut out: Vec<(String, String)> = Vec::with_capacity(80);
         macro_rules! put {
@@ -474,6 +553,10 @@ impl Stats {
             put!(&format!("rates.{name}.requests_per_sec"), r.requests_per_sec);
             put!(&format!("rates.{name}.bytes_rx_per_sec"), r.bytes_rx_per_sec);
             put!(&format!("rates.{name}.bytes_tx_per_sec"), r.bytes_tx_per_sec);
+            put!(&format!("rates.{name}.announces_per_sec"), r.announces_per_sec);
+            put!(&format!("rates.{name}.connects_per_sec"), r.connects_per_sec);
+            put!(&format!("rates.{name}.scrapes_per_sec"), r.scrapes_per_sec);
+            put!(&format!("rates.{name}.errors_per_sec"), r.errors_per_sec);
         }
         // Per-protocol cumulative counters.
         for (name, p) in [
@@ -499,11 +582,19 @@ impl Stats {
                 put!(&format!("{name}.{f}"), v);
             }
         }
-        // Swarm totals.
+        // Swarm totals (combined + per family).
         put!("swarm.torrents", torrents);
         put!("swarm.peers", peers);
         put!("swarm.seeders", seeders);
         put!("swarm.leechers", leechers);
+        put!("swarm.ipv4.torrents", t4);
+        put!("swarm.ipv4.peers", p4);
+        put!("swarm.ipv4.seeders", s4);
+        put!("swarm.ipv4.leechers", l4);
+        put!("swarm.ipv6.torrents", t6);
+        put!("swarm.ipv6.peers", p6);
+        put!("swarm.ipv6.seeders", s6);
+        put!("swarm.ipv6.leechers", l6);
         put!("swarm.peers_added_total", self.peers_added.load(Ordering::Relaxed));
         put!("swarm.peers_removed_total", self.peers_removed.load(Ordering::Relaxed));
         put!("swarm.torrents_created_total", torrents_created);
@@ -523,14 +614,14 @@ impl Stats {
     /// CSV export for GET /api/stats.csv — tidy `group,metric,value` rows.
     pub fn stats_csv(
         &self,
-        store_totals: (u64, u64, u64, u64),
+        family_totals: FamilyTotals,
         torrents_created: u64,
         swarm_bytes: u64,
         version: &str,
     ) -> String {
         let mut s = String::with_capacity(8192);
         s.push_str("group,metric,value\n");
-        for (k, v) in self.flat_stats(store_totals, torrents_created, swarm_bytes, version) {
+        for (k, v) in self.flat_stats(family_totals, torrents_created, swarm_bytes, version) {
             let (g, m) = k.split_once('.').unwrap_or((k.as_str(), ""));
             s.push_str(g);
             s.push(',');
@@ -546,13 +637,13 @@ impl Stats {
     /// per line, trivially parseable by shells, awk, and log pipelines.
     pub fn stats_txt(
         &self,
-        store_totals: (u64, u64, u64, u64),
+        family_totals: FamilyTotals,
         torrents_created: u64,
         swarm_bytes: u64,
         version: &str,
     ) -> String {
         let mut s = String::with_capacity(8192);
-        for (k, v) in self.flat_stats(store_totals, torrents_created, swarm_bytes, version) {
+        for (k, v) in self.flat_stats(family_totals, torrents_created, swarm_bytes, version) {
             s.push_str(&k);
             s.push('=');
             s.push_str(&v);
@@ -602,17 +693,19 @@ impl Stats {
     }
 
     /// Prometheus text exposition format for /metrics.
-    /// `store_totals` = (torrents, peers, seeders, leechers);
+    /// `family_totals` = per-IP-family (torrents, peers, seeders, leechers);
     /// `swarm_bytes` = estimated swarm-store memory.
     pub fn prometheus_text(
         &self,
-        store_totals: (u64, u64, u64, u64),
+        family_totals: FamilyTotals,
         torrents_created: u64,
         swarm_bytes: u64,
         version: &str,
     ) -> String {
         let uptime = self.started.elapsed().as_secs();
-        let (torrents, peers, seeders, leechers) = store_totals;
+        let ((t4, p4, s4, l4), (t6, p6, s6, l6)) = family_totals;
+        let (torrents, peers, seeders, leechers) =
+            (t4 + t6, p4 + p6, s4 + s6, l4 + l6);
         let rates = self.compute_rates();
         let mut s = String::with_capacity(8192);
         s.push_str("# HELP tsunami_info Tracker build info\n# TYPE tsunami_info gauge\ntsunami_info{version=\"");
@@ -650,18 +743,35 @@ impl Stats {
             ("udp_ipv6", rates.udp6),
             ("http", rates.http),
         ] {
-            s.push_str(&format!(
-                "# HELP tsunami_{name}_requests_per_second Requests per second\n# TYPE tsunami_{name}_requests_per_second gauge\ntsunami_{name}_requests_per_second {}\n",
-                r.requests_per_sec
-            ));
-            s.push_str(&format!(
-                "# HELP tsunami_{name}_bytes_rx_per_second Bytes received per second\n# TYPE tsunami_{name}_bytes_rx_per_second gauge\ntsunami_{name}_bytes_rx_per_second {}\n",
-                r.bytes_rx_per_sec
-            ));
-            s.push_str(&format!(
-                "# HELP tsunami_{name}_bytes_tx_per_second Bytes sent per second\n# TYPE tsunami_{name}_bytes_tx_per_second gauge\ntsunami_{name}_bytes_tx_per_second {}\n",
-                r.bytes_tx_per_sec
-            ));
+            for (mname, v) in [
+                ("requests_per_second", r.requests_per_sec),
+                ("bytes_rx_per_second", r.bytes_rx_per_sec),
+                ("bytes_tx_per_second", r.bytes_tx_per_sec),
+                ("announces_per_second", r.announces_per_sec),
+                ("connects_per_second", r.connects_per_sec),
+                ("scrapes_per_second", r.scrapes_per_sec),
+                ("errors_per_second", r.errors_per_sec),
+            ] {
+                s.push_str(&format!(
+                    "# HELP tsunami_{name}_{mname} {mname}\n# TYPE tsunami_{name}_{mname} gauge\ntsunami_{name}_{mname} {v}\n"
+                ));
+            }
+        }
+        // Per-family swarm gauges.
+        for (fam, ft_, fp, fs, fl) in [
+            ("ipv4", t4, p4, s4, l4),
+            ("ipv6", t6, p6, s6, l6),
+        ] {
+            for (mname, v) in [
+                ("torrents", ft_),
+                ("peers", fp),
+                ("seeders", fs),
+                ("leechers", fl),
+            ] {
+                s.push_str(&format!(
+                    "# HELP tsunami_{mname}_{fam} {mname} ({fam})\n# TYPE tsunami_{mname}_{fam} gauge\ntsunami_{mname}_{fam} {v}\n"
+                ));
+            }
         }
         s.push_str("# HELP tsunami_http_connections Active HTTP connections\n# TYPE tsunami_http_connections gauge\n");
         s.push_str(&format!("tsunami_http_connections {}\n", self.http_connections.load(Ordering::Relaxed)));
@@ -707,6 +817,10 @@ fn proto_rate_json(r: &ProtoRate) -> serde_json::Value {
         "requests_per_sec": r.requests_per_sec,
         "bytes_rx_per_sec": r.bytes_rx_per_sec,
         "bytes_tx_per_sec": r.bytes_tx_per_sec,
+        "announces_per_sec": r.announces_per_sec,
+        "connects_per_sec": r.connects_per_sec,
+        "scrapes_per_sec": r.scrapes_per_sec,
+        "errors_per_sec": r.errors_per_sec,
     })
 }
 

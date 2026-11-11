@@ -275,10 +275,16 @@ fn spawn_maintenance(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {
         .spawn(move || {
             loop {
                 std::thread::sleep(interval);
-                let totals = store.totals();
+                let ft = store.totals_by_family();
+                let totals = (
+                    ft.0 .0 + ft.1 .0,
+                    ft.0 .1 + ft.1 .1,
+                    ft.0 .2 + ft.1 .2,
+                    ft.0 .3 + ft.1 .3,
+                );
                 let created = store.torrents_created_total();
                 let snap = stats.snapshot_json(
-                    totals,
+                    ft,
                     created,
                     store.memory_estimate_bytes(),
                     VERSION,
