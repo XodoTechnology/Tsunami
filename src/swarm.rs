@@ -456,11 +456,15 @@ impl<S: Slot> Swarm<S> {
             return;
         }
 
+        // Bucket sizes differ by at most one; boundaries are cumulative so
+        // the loop needs no division per bucket.
+        let q = len / want;
+        let r = len % want;
+        let mut start = 0usize;
         for b in 0..want {
-            let start = b * len / want;
-            let end = ((b + 1) * len / want).max(start + 1).min(len);
+            let end = (start + q + usize::from(b < r)).min(len);
             if start >= end {
-                continue;
+                break;
             }
             let mut idx = start + rng.below(end - start);
             if Some(idx) == exclude {
@@ -469,10 +473,12 @@ impl<S: Slot> Swarm<S> {
                 } else if idx > start {
                     idx -= 1;
                 } else {
+                    start = end;
                     continue; // single-element bucket holding only self
                 }
             }
             out.push(self.peers[idx].endpoint());
+            start = end;
         }
     }
 
