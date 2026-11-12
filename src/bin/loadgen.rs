@@ -4,7 +4,7 @@
 //! then announces in a tight loop. Reports aggregate pps / response stats.
 //!
 //! usage: tsunami-loadgen --target 127.0.0.1:6881 --peers 4096 [--seconds 30]
-//!        [--numwant 50] [--seeders 0.2] [--threads 8]
+//!        [--numwant 50] [--seeders 0.2] [--threads 8] [--srcips 10.0.0.1,10.0.0.2]
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +25,7 @@ struct Args {
     info_hash: [u8; 20],
     torrents: usize,
     once: bool, // register each peer with a single announce, then idle
+    srcips: Vec<String>, // source IPs to bind sockets to (round-robin); empty = auto
 }
 
 fn parse_args() -> Args {
@@ -39,9 +40,14 @@ fn parse_args() -> Args {
         info_hash: [0x42; 20],
         torrents: 1,
         once: false,
+        srcips: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
+        if k == "--once" {
+            a.once = true;
+            continue;
+        }
         let v = it.next().unwrap_or_default();
         match k.as_str() {
             "--target" => a.target = v.parse().unwrap(),
@@ -52,13 +58,15 @@ fn parse_args() -> Args {
             "--threads" => a.threads = v.parse().unwrap(),
             "--rate" => a.rate = v.parse().unwrap(),
             "--torrents" => a.torrents = v.parse().unwrap(),
-            "--once" => a.once = true,
             "--hash" => {
                 if v.len() == 40 {
                     for i in 0..20 {
                         a.info_hash[i] = u8::from_str_radix(&v[i * 2..i * 2 + 2], 16).unwrap();
                     }
                 }
+            }
+            "--srcips" => {
+                a.srcips = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
             _ => {}
         }
@@ -174,12 +182,16 @@ fn worker(
     let mut conn_ids: Vec<i64> = Vec::with_capacity(per_thread);
     let mut txid = (tid as i32) * 1_000_000;
 
-    // bind sockets — spread across 127/8 loopback aliases so each socket
-    // gets a distinct (ip,port) tuple; the ~28k port range per IP would
-    // otherwise cap total sockets.
+    // bind sockets — with --srcips, round-robin across them so peers get
+    // distinct (ip,port) tuples and each IP keeps its own ~64k port space.
+    // Without it, bind 0.0.0.0 and let the kernel pick the route's source.
     for i in 0..per_thread {
-        // unique IP per socket: 127.<tid>.<i/256>.<i%256>
-        let bind_str = format!("127.{}.{}.{}:0", tid, i / 256, i % 256);
+        let gidx = tid * per_thread + i;
+        let bind_str = if args.srcips.is_empty() {
+            "0.0.0.0:0".to_string()
+        } else {
+            format!("{}:0", args.srcips[gidx % args.srcips.len()])
+        };
         let sock = match UdpSocket::bind(&bind_str) {
             Ok(s) => s,
             Err(_) => break,
@@ -277,6 +289,7 @@ fn worker(
     // announce loop
     let mut idx = 0usize;
     let mut since_pace = 0u32;
+    let mut pace_tick = Instant::now();
     // per-thread share of the global rate cap
     let thread_rate = if args.rate > 0 {
         (args.rate / args.threads.max(1) as u64).max(1)
@@ -318,17 +331,27 @@ fn worker(
         idx += 1;
         since_pace += 1;
 
-        // drain responses on this socket every iteration for accurate recv pps
-        while let Ok(m) = sock.recv(&mut buf) {
-            let _ = m;
-            recv.fetch_add(1, Ordering::Relaxed);
+        // drain this socket's responses every 64 sends — a recv() syscall
+        // per announce was the send-rate bottleneck; buffers hold the backlog
+        if idx % 64 == 0 {
+            while let Ok(m) = sock.recv(&mut buf) {
+                let _ = m;
+                recv.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
-        // rate pacing: every 256 announces, sleep to hit thread_rate
+        // rate pacing: every 256 announces, budget thread_rate's share of
+        // wall time for the whole batch (work + sleep), no catch-up bursts
         if thread_rate > 0 && since_pace >= 256 {
             since_pace = 0;
             let target = Duration::from_secs_f64(256.0 / thread_rate as f64);
-            std::thread::sleep(target);
+            pace_tick += target;
+            let now = Instant::now();
+            if pace_tick > now {
+                std::thread::sleep(pace_tick - now);
+            } else {
+                pace_tick = now;
+            }
         }
 
         // opportunistic recv drain every 64 sends
