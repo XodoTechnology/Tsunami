@@ -185,3 +185,9 @@ Sockets spread across `127/8` loopback aliases for many distinct peers.
 cargo test
 cargo build --release
 ```
+
+## License
+
+AGPL-3.0-only — see [LICENSE](LICENSE). Derivative works, including
+modified trackers offered as a network service, must release their
+source under the same license.
