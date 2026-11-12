@@ -214,6 +214,7 @@ pub struct Worker {
     local_v4: LocalStats,
     local_v6: LocalStats,
     rl: crate::ratelimit::RateLimiter,
+    ip_limiter: Arc<crate::ratelimit::IpConnectLimiter>,
     // --- provided-buffer-ring overflow recovery ---
     /// Whether each family's multishot recvmsg is currently armed.
     recv_live_v4: bool,
@@ -377,6 +378,10 @@ impl Worker {
         match protocol::parse_request(payload, self.config.protocol.max_scrape_torrents) {
             ParseResult::Ok(ParsedRequest::Connect { transaction_id }) => {
                 self.local_mut(is_v4_sock).connects += 1;
+                if !self.ip_limiter.allow(ip) {
+                    self.local_mut(is_v4_sock).rate_limited += 1;
+                    return;
+                }
                 let conn_id = self.validator.create(ip);
                 self.emit_simple(addr, is_v4_sock, move |b| {
                     protocol::write_connect_response(b, transaction_id, conn_id)
@@ -765,6 +770,10 @@ pub fn run_workers(
         config.network.socket_workers
     };
     let validator = Validator::new(config.protocol.max_connection_age);
+    let ip_limiter = crate::ratelimit::IpConnectLimiter::new(
+        config.ratelimit.connect_per_sec_per_ip,
+        config.ratelimit.connect_burst_secs,
+    );
     let mut handles = Vec::new();
 
     for i in 0..num_workers {
@@ -773,11 +782,14 @@ pub fn run_workers(
         let stats = stats.clone();
         let access_list = access_list.clone();
         let validator = validator.for_worker();
+        let ip_limiter = ip_limiter.clone();
         handles.push(
             std::thread::Builder::new()
                 .name(format!("udp-worker-{i:02}"))
                 .spawn(move || {
-                    if let Err(e) = worker_main(config, store, stats, access_list, validator) {
+                    if let Err(e) =
+                        worker_main(config, store, stats, access_list, validator, ip_limiter)
+                    {
                         log::error!("udp worker {i} died: {e:#}");
                     }
                 })
@@ -793,6 +805,7 @@ fn worker_main(
     stats: Arc<Stats>,
     access_list: Arc<AccessList>,
     validator: Validator,
+    ip_limiter: Arc<crate::ratelimit::IpConnectLimiter>,
 ) -> anyhow::Result<()> {
     let ring_entries = config.network.ring_size.max(64).next_power_of_two() as usize;
     // Larger CQ headroom so completion bursts don't overflow the ring and
@@ -888,6 +901,7 @@ fn worker_main(
         local_v4: LocalStats::default(),
         local_v6: LocalStats::default(),
         rl,
+        ip_limiter,
         recv_live_v4: live_v4,
         recv_live_v6: live_v6,
         recv_draining: false,

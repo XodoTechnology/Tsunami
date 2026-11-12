@@ -187,6 +187,15 @@ pub struct RateLimitConfig {
     /// Token-bucket burst allowance as a multiple of the per-second rate
     /// (1.0 = one second of burst, 2.0 = two seconds). Min 1.0.
     pub burst: f64,
+    /// Max BEP-15 connect requests/sec PER SOURCE IP, global across all
+    /// socket workers (0 = unlimited). Connects carry no peer_id so they
+    /// can't be signature-filtered; legit clients reconnect rarely since a
+    /// conn_id is per-IP and lives for max_connection_age.
+    pub connect_per_sec_per_ip: f64,
+    /// Burst capacity for the per-IP connect bucket, in seconds of rate
+    /// (e.g. 120 = absorb 120 seconds' worth of connects instantly, useful
+    /// for CGNAT reconnect waves after a restart).
+    pub connect_burst_secs: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -318,6 +327,8 @@ impl Default for RateLimitConfig {
             announce_per_sec: 0,
             scrape_per_sec: 0,
             burst: 1.0,
+            connect_per_sec_per_ip: 0.0,
+            connect_burst_secs: 120.0,
         }
     }
 }

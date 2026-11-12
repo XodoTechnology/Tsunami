@@ -24,7 +24,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::access::AccessList;
 use crate::config::Config;
 use crate::protocol::{self, ParseFailure, ParseResult, ParsedRequest};
-use crate::ratelimit::RateLimiter;
+use crate::ratelimit::{IpConnectLimiter, RateLimiter};
 use crate::stats::Stats;
 use crate::swarm::{self, InfoHash, PeerEndpoint, Rng, Store};
 use crate::udp::validator::Validator;
@@ -382,6 +382,10 @@ pub fn run_packet_workers(
     // client's announce on a different worker than its connect, so conn_ids
     // must validate everywhere (same as the io_uring backend).
     let validator = Validator::new(config.protocol.max_connection_age);
+    let ip_limiter = IpConnectLimiter::new(
+        config.ratelimit.connect_per_sec_per_ip,
+        config.ratelimit.connect_burst_secs,
+    );
     let mut handles = Vec::new();
     for i in 0..n {
         let config = config.clone();
@@ -390,11 +394,20 @@ pub fn run_packet_workers(
         let access_list = access_list.clone();
         let ifname = ifname.clone();
         let validator = validator.for_worker();
+        let ip_limiter = ip_limiter.clone();
         handles.push(
             std::thread::Builder::new()
                 .name(format!("pkt-worker-{i:02}"))
                 .spawn(move || {
-                    if let Err(e) = worker_main(config, store, stats, access_list, ifname, validator) {
+                    if let Err(e) = worker_main(
+                        config,
+                        store,
+                        stats,
+                        access_list,
+                        ifname,
+                        validator,
+                        ip_limiter,
+                    ) {
                         log::error!("pkt worker {i} died: {e:#}");
                     }
                 })
@@ -411,6 +424,7 @@ fn worker_main(
     access_list: Arc<AccessList>,
     ifname: String,
     mut validator: Validator,
+    ip_limiter: Arc<IpConnectLimiter>,
 ) -> Result<()> {
     let mut rings: Vec<(PacketRing, Socket, bool)> = Vec::new(); // (ring, tx_sock_unused, is_v4)
     let mut tx_socks: Vec<(Socket, bool)> = Vec::new();
@@ -523,6 +537,7 @@ fn worker_main(
                             &mut scrape_scratch,
                             &mut rl,
                             &config,
+                            &ip_limiter,
                         );
                     }
                 }
@@ -610,6 +625,7 @@ pub fn process_packet(
     scrape_scratch: &mut Vec<(i32, i32, i32)>,
     rl: &mut RateLimiter,
     config: &Config,
+    ip_limiter: &IpConnectLimiter,
 ) {
     let ip = src.ip();
     // L3+L4 header overhead for byte accounting: IPv4=20+8, IPv6=40+8.
@@ -621,6 +637,10 @@ pub fn process_packet(
     let resp_len = match protocol::parse_request(payload, config.protocol.max_scrape_torrents) {
         ParseResult::Ok(ParsedRequest::Connect { transaction_id }) => {
             local.connects.fetch_add(1, Ordering::Relaxed);
+            if !ip_limiter.allow(ip) {
+                local.rate_limited.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
             let conn_id = validator.create(ip);
             protocol::write_connect_response(out, transaction_id, conn_id)
         }

@@ -130,6 +130,13 @@ announce_per_sec = 0
 scrape_per_sec = 0
 # Token-bucket burst as a multiple of the per-second rate (1.0 = 1s burst).
 burst = 1.0
+# Per-source-IP connect limit, GLOBAL across all socket workers (0 = off).
+# Connects carry no peer_id so they can't be signature-filtered; a legit
+# client reconnects only when its conn_id expires (~once per
+# max_connection_age), so even CGNAT-heavy IPs stay far below typical
+# values. Burst absorbs reconnect waves (e.g. after a restart).
+# connect_per_sec_per_ip = 0.5
+# connect_burst_secs = 120
 
 [logging]
 # error|warn|info|debug|trace
