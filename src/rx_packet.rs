@@ -636,11 +636,11 @@ pub fn process_packet(
 
     let resp_len = match protocol::parse_request(payload, config.protocol.max_scrape_torrents) {
         ParseResult::Ok(ParsedRequest::Connect { transaction_id }) => {
-            local.connects.fetch_add(1, Ordering::Relaxed);
             if !ip_limiter.allow(ip) {
                 local.rate_limited.fetch_add(1, Ordering::Relaxed);
                 return;
             }
+            local.connects.fetch_add(1, Ordering::Relaxed);
             let conn_id = validator.create(ip);
             protocol::write_connect_response(out, transaction_id, conn_id)
         }

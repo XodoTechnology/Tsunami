@@ -377,11 +377,11 @@ impl Worker {
         let ip = addr.ip();
         match protocol::parse_request(payload, self.config.protocol.max_scrape_torrents) {
             ParseResult::Ok(ParsedRequest::Connect { transaction_id }) => {
-                self.local_mut(is_v4_sock).connects += 1;
                 if !self.ip_limiter.allow(ip) {
                     self.local_mut(is_v4_sock).rate_limited += 1;
                     return;
                 }
+                self.local_mut(is_v4_sock).connects += 1;
                 let conn_id = self.validator.create(ip);
                 self.emit_simple(addr, is_v4_sock, move |b| {
                     protocol::write_connect_response(b, transaction_id, conn_id)
