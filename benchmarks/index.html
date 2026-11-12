@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsunami vs Aquatic vs opentracker — UDP tracker benchmark</title>
+<style>
+  :root { --bg:#0f1419; --card:#171e26; --line:#2a3441; --txt:#dbe4ee; --dim:#8b9bb0; --acc:#4da3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.55 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:1080px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:19px; margin:38px 0 10px; padding-top:14px; border-top:1px solid var(--line); }
+  h3 { font-size:15px; margin:22px 0 6px; color:var(--acc); }
+  .sub { color:var(--dim); margin-bottom:26px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 20px; margin:14px 0; }
+  img { width:100%; border-radius:8px; border:1px solid var(--line); display:block; }
+  .cap { color:var(--dim); font-size:13px; margin:8px 0 0; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:14px; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .win { color:#5fd08a; font-weight:600; }
+  .lose { color:#ff8a80; }
+  code { background:#0b0f14; padding:1px 6px; border-radius:4px; font-size:13px; }
+  ul { margin:8px 0; padding-left:22px; } li { margin:4px 0; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:760px){ .grid2{grid-template-columns:1fr;} }
+  .tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--dim); margin-left:8px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>UDP Tracker Benchmark — Tsunami vs Aquatic vs opentracker</h1>
+<div class="sub">Isolated Proxmox VMs &middot; identical conditions per cell &middot; BEP-15 UDP announce workload</div>
+
+<div class="card">
+<b>Environment.</b> Tracker VM: 20 vCPU / 40&nbsp;GiB, Debian 13, virtio-net (16 TX/RX queues for the final runs).
+Two 8-vCPU loadgen VMs (7 source IPs each) drive traffic over the real virtio path.
+Trackers run sequentially on the same VM; all three see the same loadgen binary,
+parameters, and kernel tuning (<code>net.core.rmem_max=256MB</code>, RPS spread,
+TX queue backlog raised). Workloads: <b>sustain</b> (~185K req/s offered, 50K peers,
+200 torrents, numwant=50, 60s), <b>flood</b> (~440K/s delivered — the loadgen's own
+ceiling), <b>dual-flood</b> (two loadgen VMs simultaneously, ~300–400K/s NIC ceiling),
+<b>store</b> (~220K peer registration burst).
+</div>
+
+<h2>Responses per second — the headline view</h2>
+<p class="cap">Steady-state responses delivered back to peers. All three trackers
+converge to ~155–161K responses/s under the sustained ~185K/s offer — i.e. everyone
+keeps up; differences show in CPU cost, not delivered throughput.</p>
+<img src="graphs/sustain_respsec.png" alt="sustain responses per second">
+
+<div class="grid2">
+<div><img src="graphs/flood_respsec.png" alt="flood responses per second"><div class="cap">Flood — all three absorb the full offered rate with zero tracker-side drops.</div></div>
+<div><img src="graphs/x_respsec.png" alt="dual flood responses per second"><div class="cap">Dual-flood — two loadgen VMs. opentracker visibly collapses (kernel drops); Tsunami and Aquatic stay up.</div></div>
+</div>
+<img src="graphs/store_respsec.png" alt="store responses per second"><div class="cap">Store — burst registration of ~220K peers across torrents.</div>
+
+<h2>Where the CPU actually goes</h2>
+<p class="cap">Profiling (<code>perf</code>) showed Tsunami's earlier CPU deficit was
+mostly <b>self-inflicted lock/queue contention</b>, not per-packet cost:</p>
+<ul>
+  <li>The bench NIC had <b>4 virtio TX queues</b> — all workers serialized on a few
+      qdisc locks (~12% of all samples in <code>__dev_queue_xmit</code> spinlock).
+      Raising to 16 queues cut that ~3&times;.</li>
+  <li><b>Worker count is the dominant lever.</b> With only 200 hot torrents in the
+      benchmark, 20 workers thrash the same per-torrent <code>RwLock</code>s.
+      Fewer workers ⇒ less cross-core contention ⇒ <i>less total CPU</i> for the
+      same throughput. (Production has millions of torrents, so per-torrent
+      contention is far rarer — but the direction is real.)</li>
+  <li><code>sample_peers</code> did ~100 integer divisions per response; now uses
+      cumulative bucket boundaries (commit <code>d021b93</code>).</li>
+</ul>
+<img src="graphs/workers_scaling.png" alt="CPU vs worker count">
+
+<h2>Head-to-head — sustained workload, identical conditions</h2>
+<table>
+<tr><th>Tracker</th><th class="num">CPU (cores)</th><th class="num">CPU µs/req</th><th class="num">RSS</th><th class="num">Responses/s</th><th class="num">Errors</th><th class="num">Kernel drops</th></tr>
+<tr><td><b>Tsunami</b> (8 workers + opts)</td><td class="num win">2.75</td><td class="num win">~15.6</td><td class="num">~630 MB*</td><td class="num">~165K</td><td class="num">0</td><td class="num">0</td></tr>
+<tr><td>Aquatic (8 workers)</td><td class="num">2.95</td><td class="num">~16.8</td><td class="num win">23 MB</td><td class="num">~163K</td><td class="num">0</td><td class="num">0</td></tr>
+<tr><td>opentracker</td><td class="num">2.8</td><td class="num">—</td><td class="num win">3 MB</td><td class="num">~156K</td><td class="num">0</td><td class="num">0*</td></tr>
+</table>
+<div class="cap">*Tsunami RSS is dominated by preallocated io_uring/buffer pools
+(demand-paged), not per-peer state — swarm-store level it is ~45 B/peer vs
+Aquatic ~80 B/peer and opentracker ~25 B/peer. opentracker's "0 drops" here is the
+sustain cell; under dual-flood it dropped 12.6M packets at the kernel.</div>
+
+<img src="graphs/summary_sustain.png" alt="summary dashboard">
+
+<h2>CPU vs worker count — Tsunami tuning curve</h2>
+<table>
+<tr><th>socket_workers</th><th class="num">CPU avg</th><th class="num">µs/request</th><th>notes</th></tr>
+<tr><td>20</td><td class="num">~4.6c</td><td class="num">~26</td><td>default on 20 vCPU — worst case for lock contention</td></tr>
+<tr><td>8</td><td class="num win">2.75c</td><td class="num win">~15.6</td><td>beats Aquatic; recommended floor</td></tr>
+<tr><td>4</td><td class="num">1.76c</td><td class="num">~10</td><td></td></tr>
+<tr><td>2</td><td class="num">1.19c</td><td class="num">~6.9</td><td>still keeps up at ~190K/s offered</td></tr>
+<tr><td>1</td><td class="num">0.83c</td><td class="num">—</td><td class="lose">saturates ~150K/s — do not use</td></tr>
+</table>
+
+<h2>Feature comparison — the part benchmarks don't measure</h2>
+<table>
+<tr><th></th><th>Tsunami</th><th>Aquatic</th><th>opentracker</th></tr>
+<tr><td>BEP-15 UDP / BEP-3 HTTP / BEP-12 scrape</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td></tr>
+<tr><td>IPv6</td><td>&#10003;</td><td>&#10003;</td><td>&#10003;</td></tr>
+<tr><td>REST/JSON stats API + dashboard</td><td>&#10003;</td><td>—</td><td>—</td></tr>
+<tr><td>Prometheus metrics</td><td>&#10003;</td><td>—</td><td>—</td></tr>
+<tr><td>Peer snapshots / fast restart</td><td>&#10003; (~9s restore at 48M peers)</td><td>—</td><td>—</td></tr>
+<tr><td>Client (peer_id) statistics</td><td>&#10003;</td><td>—</td><td>—</td></tr>
+<tr><td>Abuse controls (conn-id validation, synthetic-ID filter, rate limits, access lists)</td><td>&#10003;</td><td>partial</td><td>—</td></tr>
+<tr><td>WebSocket tracker transport</td><td>&#10003;</td><td>—</td><td>—</td></tr>
+<tr><td>License</td><td>AGPL-3.0</td><td>AGPL-3.0</td><td>CC0 / custom</td></tr>
+</table>
+
+<h2>Honest caveats</h2>
+<div class="card">
+<ul>
+  <li><b>"Loss" includes a loadgen artifact:</b> ~14% of simulated peers fail the
+      BEP-15 connect handshake, then announce with conn_id=0 and are correctly
+      rejected — identical across all three trackers. It is not packet loss.</li>
+  <li><b>Throughput numbers are floors, not ceilings:</b> the loadgen VM saturates
+      around ~440K req/s (single) / ~400K/s (dual), below what the trackers can
+      do. All three "kept up" — differences are in cost, not delivered rate.</li>
+  <li><b>200 torrents is a worst case for lock contention.</b> Production swarms
+      have millions of torrents; per-torrent lock contention is far rarer, so
+      the worker-count penalty is smaller in production than in this benchmark.</li>
+  <li><b>VM, not bare metal:</b> virtio TX/RX paths add fixed per-packet cost for
+      everyone; absolute numbers will differ on physical NICs (kernel-bypass
+      RX is available in Tsunami via <code>rx_backend</code>).</li>
+  <li><b>opentracker</b> wins raw memory (~14–25 B/peer) but is single-threaded
+      and dropped 12.6M packets under dual-flood — it is the fragile option under
+      burst, which is exactly when a tracker is needed most.</li>
+</ul>
+</div>
+
+<div class="card">
+<b>Bottom line.</b> At matched CPU-efficient configuration Tsunami matches or
+beats Aquatic on CPU per request (~15.6µs vs ~16.8µs at 8 workers), keeps up
+with every offered rate tested, and adds the observability/ops surface the
+others lack — snapshots that restore 48M peers in ~9s, client statistics,
+Prometheus, abuse filtering that caught a real 190K/s announce-flood in
+production. Its costs: higher baseline RSS (I/O pools, demand-paged) and a
+larger codebase. For a 50M-peer deployment the snapshot/restore and abuse
+controls are the decisive advantages; for a minimal always-on tracker,
+Aquatic remains a solid, leaner choice.
+</div>
+
+<p class="cap">Raw data: per-second loadgen logs, kernel counters, process
+samples, and tracker metrics for every cell are in <code>vm-results/</code>.
+Graphs generated from the loadgen logs' per-second recv rates.</p>
+
+</div>
+</body>
+</html>
