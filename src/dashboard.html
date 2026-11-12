@@ -340,6 +340,7 @@ const WIDGET_GROUPS = [
   ['Cards', [
     ['card_peers','Peers'], ['card_seeders','Seeders'], ['card_leechers','Leechers'],
     ['card_torrents','Torrents'], ['card_reqps','Requests / sec'],
+    ['card_blocked','Blocked / sec'],
     ['card_joinps','Peer joins / sec'], ['card_mem','Memory (RSS)'],
     ['card_cpu','CPU'], ['card_httpconns','HTTP connections'],
     ['card_cq','CQ overflows'],
@@ -516,12 +517,16 @@ async function tick() {
     $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
 
     // ---- cards (all generated; visibility applied by data-w) ----
+    const blockedRate = ((r.udp_ipv4||{}).blocked_per_sec||0)
+                      + ((r.udp_ipv6||{}).blocked_per_sec||0)
+                      + ((r.http||{}).blocked_per_sec||0);
     $('cards').innerHTML =
       card('Peers','<span style="color:var(--green)">'+fmt(sw.peers)+'</span>','green','card_peers') +
       card('Seeders',fmt(sw.seeders),'green','card_seeders') +
       card('Leechers',fmt(sw.leechers),'amber','card_leechers') +
       card('Torrents',fmt(sw.torrents),'blue','card_torrents') +
       card('Req / sec',fmt(r.requests_per_sec),'purple','card_reqps') +
+      card('Blocked / sec',fmt(blockedRate), blockedRate>0?'red':'','card_blocked') +
       card('Joins / sec',fmt(r.peers_added_per_sec),'','card_joinps') +
       card('Memory',fmtBytes(sys.rss_bytes),'red','card_mem') +
       card('CPU',(sys.cpu_percent||0).toFixed(0)+'%','blue','card_cpu') +
@@ -545,6 +550,7 @@ async function tick() {
       sub('HTTP/WS', fmtBr(ph.bytes_tx_per_sec)) +
       row('Peer joins / sec', fmt(r.peers_added_per_sec)) +
       row('Peer leaves / sec', fmt(r.peers_removed_per_sec)) +
+      row('Blocked / sec', `<span style="color:${blockedRate>0?'var(--red)':'inherit'}">${fmt(blockedRate)}</span>`) +
       row('HTTP connections', fmt(st.http_connections)) +
       row('CQ overflows', fmt(st.cqe_overflow_total));
 
@@ -562,13 +568,14 @@ async function tick() {
       ['Bytes sent',        p=>fmtBytes(p.bytes_tx),       rr=>fmtBr(rr.bytes_tx_per_sec)],
       ['Dropped',           p=>p.dropped?fmt(p.dropped):'<span class="dim">0</span>', null],
       ['Rate-limited',      p=>p.rate_limited?`<span style="color:var(--red)">${fmt(p.rate_limited)}</span>`:'<span class="dim">0</span>', null],
+      ['Blocked',           p=>p.blocked?`<span style="color:var(--red)">${fmt(p.blocked)}</span>`:'<span class="dim">0</span>', null],
       ['Started events',    p=>fmt(p.ev_started||0),       null],
       ['Completed events',  p=>fmt(p.ev_completed||0),     null],
       ['Stopped events',    p=>fmt(p.ev_stopped||0),       null],
       ['Req / sec',         null,                          rr=>fmt(rr.requests_per_sec)],
     ];
     let pt = `<table><thead><tr><th>Metric</th><th class="num">UDP IPv4</th><th class="num">UDP IPv6</th><th class="num">HTTP / WS</th><th class="num">All</th></tr></thead><tbody>`;
-    const statKey = {Requests:'requests',Connects:'connects',Announces:'announces',Scrapes:'scrapes',Errors:'errors','Bytes received':'bytes_rx','Bytes sent':'bytes_tx',Dropped:'dropped','Rate-limited':'rate_limited','Started events':'ev_started','Completed events':'ev_completed','Stopped events':'ev_stopped'};
+    const statKey = {Requests:'requests',Connects:'connects',Announces:'announces',Scrapes:'scrapes',Errors:'errors','Bytes received':'bytes_rx','Bytes sent':'bytes_tx',Dropped:'dropped','Rate-limited':'rate_limited',Blocked:'blocked','Started events':'ev_started','Completed events':'ev_completed','Stopped events':'ev_stopped'};
     mrows.forEach(([label, gf, gr]) => {
       const cells = P.map((p,i) => {
         if (gf && gr) return `<td class="num">${gf(p)}<br><span class="dim">${gr(R[i])}</span></td>`;

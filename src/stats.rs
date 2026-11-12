@@ -530,6 +530,9 @@ impl Stats {
                         "udp4_bytes_tx": s.udp4_bytes_tx,
                         "udp6_bytes_tx": s.udp6_bytes_tx,
                         "http_bytes_tx": s.http_bytes_tx,
+                        "udp4_blocked": s.udp4_blocked,
+                        "udp6_blocked": s.udp6_blocked,
+                        "http_blocked": s.http_blocked,
                         "torrents": s.torrents,
                         "peers": s.peers,
                         "seeders": s.seeders,
@@ -687,7 +690,7 @@ impl Stats {
     /// Wide CSV of the per-second samples for GET /api/timeseries.csv —
     /// one row per second, one column per metric (logging/TSDB friendly).
     pub fn timeseries_csv(&self, seconds: u64) -> String {
-        const HEADER: &str = "t,requests,bytes_rx,bytes_tx,udp4_requests,udp6_requests,http_requests,udp4_bytes_rx,udp6_bytes_rx,http_bytes_rx,udp4_bytes_tx,udp6_bytes_tx,http_bytes_tx,torrents,peers,seeders,leechers,peers_added,peers_removed,rss_bytes,swarm_bytes,cpu_percent\n";
+        const HEADER: &str = "t,requests,bytes_rx,bytes_tx,udp4_requests,udp6_requests,http_requests,udp4_bytes_rx,udp6_bytes_rx,http_bytes_rx,udp4_bytes_tx,udp6_bytes_tx,http_bytes_tx,udp4_blocked,udp6_blocked,http_blocked,torrents,peers,seeders,leechers,peers_added,peers_removed,rss_bytes,swarm_bytes,cpu_percent\n";
         let now_ms = self.started.elapsed().as_millis() as u64;
         let cutoff = now_ms.saturating_sub(seconds.saturating_mul(1000));
         let mut s = String::with_capacity(64 * 1024);
@@ -695,7 +698,7 @@ impl Stats {
         self.with_samples(|q| {
             for smp in q.iter().filter(|x| x.ts_ms >= cutoff) {
                 s.push_str(&format!(
-                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1}\n",
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1}\n",
                     smp.ts_ms / 1000,
                     smp.requests,
                     smp.bytes_rx,
@@ -709,6 +712,9 @@ impl Stats {
                     smp.udp4_bytes_tx,
                     smp.udp6_bytes_tx,
                     smp.http_bytes_tx,
+                    smp.udp4_blocked,
+                    smp.udp6_blocked,
+                    smp.http_blocked,
                     smp.torrents,
                     smp.peers,
                     smp.seeders,
