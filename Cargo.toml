@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "High-performance BitTorrent tracker (UDP + HTTP)"
+readme = "README.md"
+repository = "https://github.com/XodoTechnology/Tsunami"
+keywords = ["bittorrent", "tracker", "udp", "peer-to-peer"]
+categories = ["network-programming", "command-line-utilities"]
 
 [lib]
 name = "tsunami"

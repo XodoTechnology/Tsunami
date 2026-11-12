@@ -1041,8 +1041,8 @@ mod tests {
     #[test]
     fn mask_ipv4_keeps_first_and_last() {
         assert_eq!(
-            mask_ip(&IpAddr::from_str("185.121.170.11").unwrap()),
-            "185.xxx.xxx.11"
+            mask_ip(&IpAddr::from_str("203.0.113.11").unwrap()),
+            "203.xxx.xxx.11"
         );
         assert_eq!(
             mask_ip(&IpAddr::from_str("127.0.0.1").unwrap()),
