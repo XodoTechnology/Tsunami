@@ -12,11 +12,12 @@
 //!   with index fixups (no full index rebuild)
 
 use std::hash::Hash;
+use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use hashbrown::HashMap;
-use parking_lot::RwLock;
+use hashbrown::{HashMap, HashTable};
+use parking_lot::{RwLock, RwLockWriteGuard};
 
 pub type InfoHash = [u8; 20];
 pub type PeerId = [u8; 20];
@@ -85,11 +86,13 @@ pub struct PeerEndpoint {
 // Slot trait + concrete slot types
 // ---------------------------------------------------------------------------
 
-pub trait Slot: Copy + Send + Sync + 'static {
+pub trait Slot: Clone + Send + Sync + 'static {
     type Key: Copy + Eq + Hash + Send + Sync + 'static;
 
     /// Identity key for (ip, port). None if ip family doesn't match.
     fn key_for(ip: &IpAddr, port: u16) -> Option<Self::Key>;
+    /// Fast 64-bit hash of `Key` for index table probing.
+    fn hash_key(key: &Self::Key) -> u64;
     /// Construct a slot. Caller guarantees ip family matches.
     fn new_slot(ip: &IpAddr, port: u16, seeder: bool, valid_until: u32) -> Self;
 
@@ -98,20 +101,40 @@ pub trait Slot: Copy + Send + Sync + 'static {
     fn set_seeder(&mut self, seeder: bool);
     fn valid_until(&self) -> u32;
     fn set_valid_until(&mut self, t: u32);
+    fn refresh_valid_until(&self, t: u32);
     fn endpoint(&self) -> PeerEndpoint;
 }
 
 const SEEDER_FLAG: u8 = 1;
 
+#[inline]
+fn mix64(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^ (x >> 31)
+}
+
 /// IPv4 peer slot — 12 bytes.
-#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Slot4 {
     ip: u32, // u32::from(Ipv4Addr) canonical form
     port: u16,
     flags: u8,
     _pad: u8,
-    valid_until: u32,
+    valid_until: AtomicU32,
+}
+
+impl Clone for Slot4 {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            ip: self.ip,
+            port: self.port,
+            flags: self.flags,
+            _pad: self._pad,
+            valid_until: AtomicU32::new(self.valid_until.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl Slot for Slot4 {
@@ -126,6 +149,11 @@ impl Slot for Slot4 {
     }
 
     #[inline]
+    fn hash_key(key: &u64) -> u64 {
+        mix64(*key)
+    }
+
+    #[inline]
     fn new_slot(ip: &IpAddr, port: u16, seeder: bool, valid_until: u32) -> Self {
         let ip = match ip {
             IpAddr::V4(v4) => u32::from(*v4),
@@ -136,7 +164,7 @@ impl Slot for Slot4 {
             port,
             flags: if seeder { SEEDER_FLAG } else { 0 },
             _pad: 0,
-            valid_until,
+            valid_until: AtomicU32::new(valid_until),
         }
     }
 
@@ -158,11 +186,17 @@ impl Slot for Slot4 {
     }
     #[inline]
     fn valid_until(&self) -> u32 {
-        self.valid_until
+        self.valid_until.load(Ordering::Relaxed)
     }
     #[inline]
     fn set_valid_until(&mut self, t: u32) {
-        self.valid_until = t;
+        *self.valid_until.get_mut() = t;
+    }
+    #[inline]
+    fn refresh_valid_until(&self, t: u32) {
+        if self.valid_until.load(Ordering::Relaxed) != t {
+            self.valid_until.store(t, Ordering::Relaxed);
+        }
     }
     #[inline]
     fn endpoint(&self) -> PeerEndpoint {
@@ -182,14 +216,26 @@ pub struct Key6 {
 }
 
 /// IPv6 peer slot — 24 bytes.
-#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Slot6 {
     ip: [u8; 16],
     port: u16,
     flags: u8,
     _pad: u8,
-    valid_until: u32,
+    valid_until: AtomicU32,
+}
+
+impl Clone for Slot6 {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            ip: self.ip,
+            port: self.port,
+            flags: self.flags,
+            _pad: self._pad,
+            valid_until: AtomicU32::new(self.valid_until.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl Slot for Slot6 {
@@ -207,6 +253,14 @@ impl Slot for Slot6 {
     }
 
     #[inline]
+    fn hash_key(key: &Key6) -> u64 {
+        let a = u64::from_ne_bytes(key.ip[0..8].try_into().unwrap());
+        let b = u64::from_ne_bytes(key.ip[8..16].try_into().unwrap());
+        let c = key.port as u64;
+        mix64(a.wrapping_mul(0x9E3779B97F4A7C15) ^ b.rotate_left(23) ^ c)
+    }
+
+    #[inline]
     fn new_slot(ip: &IpAddr, port: u16, seeder: bool, valid_until: u32) -> Self {
         let ip = match ip {
             IpAddr::V6(v6) => v6.octets(),
@@ -217,7 +271,7 @@ impl Slot for Slot6 {
             port,
             flags: if seeder { SEEDER_FLAG } else { 0 },
             _pad: 0,
-            valid_until,
+            valid_until: AtomicU32::new(valid_until),
         }
     }
 
@@ -242,11 +296,17 @@ impl Slot for Slot6 {
     }
     #[inline]
     fn valid_until(&self) -> u32 {
-        self.valid_until
+        self.valid_until.load(Ordering::Relaxed)
     }
     #[inline]
     fn set_valid_until(&mut self, t: u32) {
-        self.valid_until = t;
+        *self.valid_until.get_mut() = t;
+    }
+    #[inline]
+    fn refresh_valid_until(&self, t: u32) {
+        if self.valid_until.load(Ordering::Relaxed) != t {
+            self.valid_until.store(t, Ordering::Relaxed);
+        }
     }
     #[inline]
     fn endpoint(&self) -> PeerEndpoint {
@@ -308,22 +368,163 @@ impl AnnounceInput {
 // Swarm: one info hash's peer set
 // ---------------------------------------------------------------------------
 
+/// Peers stored inline before spilling to a heap `Vec<S>`.
+/// 2 IPv4 slots = 24 bytes (exact size of a Vec header), eliminating all
+/// per-swarm heap allocations for 1- and 2-peer torrents.
+const INLINE_CAP: usize = 2;
+
+/// Swarms up to this size use linear scan over contiguous slots instead of
+/// allocating a `HashTable<u32>` index (8 slots = 96B = 1.5 cache lines).
+const INDEX_THRESHOLD: usize = 8;
+
+enum PeerVec<S: Slot> {
+    Inline {
+        len: u8,
+        slots: [MaybeUninit<S>; INLINE_CAP],
+    },
+    Heap(Vec<S>),
+}
+
+impl<S: Slot> PeerVec<S> {
+    #[inline]
+    fn new() -> Self {
+        Self::Inline {
+            len: 0,
+            slots: [const { MaybeUninit::uninit() }; INLINE_CAP],
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => *len as usize,
+            Self::Heap(v) => v.len(),
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[S] {
+        match self {
+            Self::Inline { len, slots } => unsafe {
+                std::slice::from_raw_parts(slots.as_ptr() as *const S, *len as usize)
+            },
+            Self::Heap(v) => v.as_slice(),
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [S] {
+        match self {
+            Self::Inline { len, slots } => unsafe {
+                std::slice::from_raw_parts_mut(slots.as_mut_ptr() as *mut S, *len as usize)
+            },
+            Self::Heap(v) => v.as_mut_slice(),
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, val: S) {
+        match self {
+            Self::Inline { len, slots } => {
+                let l = *len as usize;
+                if l < INLINE_CAP {
+                    slots[l].write(val);
+                    *len = (l + 1) as u8;
+                } else {
+                    let mut v = Vec::with_capacity(4);
+                    for s in slots.iter() {
+                        v.push(unsafe { s.assume_init_read() });
+                    }
+                    v.push(val);
+                    *self = Self::Heap(v);
+                }
+            }
+            Self::Heap(v) => v.push(val),
+        }
+    }
+
+    #[inline]
+    fn swap_remove(&mut self, index: usize) -> S {
+        match self {
+            Self::Inline { len, slots } => {
+                let l = *len as usize;
+                debug_assert!(index < l);
+                *len = (l - 1) as u8;
+                let removed = unsafe { slots[index].assume_init_read() };
+                if index != l - 1 {
+                    slots[index] = unsafe { std::ptr::read(&slots[l - 1]) };
+                }
+                removed
+            }
+            Self::Heap(v) => v.swap_remove(index),
+        }
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        let needed = self.len().saturating_add(additional);
+        if needed <= INLINE_CAP {
+            return;
+        }
+        match self {
+            Self::Inline { len, slots } => {
+                let l = *len as usize;
+                let mut v = Vec::with_capacity(needed);
+                for s in &slots[..l] {
+                    v.push(unsafe { s.assume_init_read() });
+                }
+                *self = Self::Heap(v);
+            }
+            Self::Heap(v) => v.reserve(additional),
+        }
+    }
+
+    fn shrink_if_sparse(&mut self) {
+        if let Self::Heap(v) = self {
+            if v.len() <= INLINE_CAP {
+                let mut slots = [const { MaybeUninit::uninit() }; INLINE_CAP];
+                let l = v.len();
+                for (i, item) in v.drain(..).enumerate() {
+                    slots[i].write(item);
+                }
+                *self = Self::Inline {
+                    len: l as u8,
+                    slots,
+                };
+            } else if v.capacity() > 32 && v.capacity() > v.len() * 4 {
+                v.shrink_to(v.len().max(4));
+            }
+        }
+    }
+}
+
 pub struct Swarm<S: Slot> {
-    peers: Vec<S>,
-    index: HashMap<S::Key, u32>,
-    seeders: u32,
+    peers: PeerVec<S>,
+    /// Lazy index table storing only `u32` slot indices (4B/entry instead of
+    /// duplicating `S::Key` in every bucket). `None` for swarms <= INDEX_THRESHOLD.
+    index: Option<Box<HashTable<u32>>>,
     /// Optional peer_id side table (only populated when store_peer_id enabled).
     /// Used for HTTP compact=0 peer_id echo and per-torrent peer detail API.
-    peer_ids: Option<HashMap<S::Key, PeerId>>,
+    peer_ids: Option<Box<HashMap<S::Key, PeerId>>>,
+    seeders: u32,
+    /// Lower bound on `valid_until` across all peers in this swarm (`u32::MAX`
+    /// when empty). Lets the cleaner skip unexpired swarms in O(1) under a
+    /// shared read lock without scanning `peers`.
+    min_valid_until: u32,
 }
 
 impl<S: Slot> Swarm<S> {
     pub fn new(store_peer_id: bool) -> Self {
         Self {
-            peers: Vec::new(),
-            index: HashMap::new(),
+            peers: PeerVec::new(),
+            index: None,
+            peer_ids: store_peer_id.then(|| Box::new(HashMap::new())),
             seeders: 0,
-            peer_ids: store_peer_id.then(HashMap::new),
+            min_valid_until: u32::MAX,
         }
     }
 
@@ -340,6 +541,151 @@ impl<S: Slot> Swarm<S> {
     #[inline]
     pub fn num_peers(&self) -> (u32, u32) {
         (self.seeders, self.peers.len() as u32 - self.seeders)
+    }
+
+    #[inline]
+    pub fn needs_clean(&self, now: u32) -> bool {
+        self.peers.is_empty() || self.min_valid_until <= now
+    }
+
+    #[inline]
+    fn find_slot(&self, key: &S::Key) -> Option<u32> {
+        let peers = self.peers.as_slice();
+        match &self.index {
+            Some(idx) => {
+                let h = S::hash_key(key);
+                idx.find(h, |&slot| peers[slot as usize].key() == *key)
+                    .copied()
+            }
+            None => peers.iter().position(|p| p.key() == *key).map(|i| i as u32),
+        }
+    }
+
+    #[inline]
+    fn insert_slot(&mut self, new_slot: S) -> usize {
+        let key = new_slot.key();
+        let exp = new_slot.valid_until();
+        if exp < self.min_valid_until {
+            self.min_valid_until = exp;
+        }
+        let slot = self.peers.len();
+        self.peers.push(new_slot);
+        let new_len = self.peers.len();
+        if let Some(idx) = self.index.as_mut() {
+            let peers = self.peers.as_slice();
+            idx.insert_unique(S::hash_key(&key), slot as u32, |&s| {
+                S::hash_key(&peers[s as usize].key())
+            });
+        } else if new_len > INDEX_THRESHOLD {
+            let peers = self.peers.as_slice();
+            let mut idx = Box::new(HashTable::with_capacity(new_len * 2));
+            for (i, p) in peers.iter().enumerate() {
+                let k = p.key();
+                idx.insert_unique(S::hash_key(&k), i as u32, |&s| {
+                    S::hash_key(&peers[s as usize].key())
+                });
+            }
+            self.index = Some(idx);
+        }
+        slot
+    }
+
+    /// Fast read-only announce path for existing peers whose seeder state has
+    /// not changed. Runs entirely under the swarm's shared `RwLock::read()`
+    /// guard, refreshing `valid_until` atomically and sampling peers without
+    /// serializing concurrent workers on the same torrent.
+    #[inline]
+    pub fn try_announce_read(
+        &self,
+        input: &AnnounceInput,
+        key: &S::Key,
+        now: u32,
+        max_peer_age: u32,
+        max_peers: usize,
+        rng: &mut Rng,
+        out: &mut Vec<PeerEndpoint>,
+    ) -> Option<(u32, u32, bool, bool)> {
+        if input.event == AnnounceEvent::Stopped || self.peer_ids.is_some() {
+            return None;
+        }
+        let slot = self.find_slot(key)? as usize;
+        let is_seeder = input.left == 0;
+        let peers = self.peers.as_slice();
+        let s = &peers[slot];
+        if s.is_seeder() != is_seeder {
+            return None;
+        }
+        s.refresh_valid_until(now.wrapping_add(max_peer_age));
+        out.clear();
+        let (seeders, leechers) = self.num_peers();
+        let want = max_peers + 1;
+        self.sample_peers(want, Some(slot), rng, out);
+        out.truncate(max_peers);
+        Some((seeders, leechers, false, false))
+    }
+
+    /// Mutating part of an announce (insert, remove, or seeder-flag flip).
+    /// Returns `(self_slot, added, removed)`; caller may downgrade the write
+    /// lock to a shared read lock before calling `sample_peers`.
+    #[inline]
+    fn announce_mutate(
+        &mut self,
+        input: &AnnounceInput,
+        key: S::Key,
+        now: u32,
+        max_peer_age: u32,
+    ) -> (Option<usize>, bool, bool) {
+        let is_stopped = input.event == AnnounceEvent::Stopped;
+        let is_seeder = !is_stopped && input.left == 0;
+        let existing = self.find_slot(&key);
+        let mut added = false;
+        let mut removed = false;
+        let mut self_slot: Option<usize> = None;
+
+        if is_stopped {
+            if let Some(slot) = existing {
+                self.remove_at(slot as usize);
+                removed = true;
+            }
+        } else {
+            let exp = now.wrapping_add(max_peer_age);
+            match existing {
+                Some(slot) => {
+                    let peers = self.peers.as_mut_slice();
+                    let len = peers.len();
+                    let s = &mut peers[slot as usize];
+                    let was_seeder = s.is_seeder();
+                    s.set_seeder(is_seeder);
+                    s.set_valid_until(exp);
+                    if len == 1 {
+                        self.min_valid_until = exp;
+                    }
+                    if was_seeder != is_seeder {
+                        if is_seeder {
+                            self.seeders += 1;
+                        } else {
+                            self.seeders -= 1;
+                        }
+                    }
+                    self_slot = Some(slot as usize);
+                    if let Some(m) = self.peer_ids.as_mut() {
+                        m.insert(key, input.peer_id);
+                    }
+                }
+                None => {
+                    let slot = self.insert_slot(S::new_slot(&input.ip, input.port, is_seeder, exp));
+                    if is_seeder {
+                        self.seeders += 1;
+                    }
+                    self_slot = Some(slot);
+                    added = true;
+                    if let Some(m) = self.peer_ids.as_mut() {
+                        m.insert(key, input.peer_id);
+                    }
+                }
+            }
+        }
+        (self_slot, added, removed)
     }
 
     /// Process an announce. Returns (seeders, leechers, added, removed)
@@ -360,68 +706,13 @@ impl<S: Slot> Swarm<S> {
         out.clear();
 
         let Some(key) = S::key_for(&input.ip, input.port) else {
-            // family mismatch — shouldn't happen; respond with zeros
             let (s, l) = self.num_peers();
             return (s, l, false, false);
         };
 
-        let is_stopped = input.event == AnnounceEvent::Stopped;
-        let is_seeder = !is_stopped && input.left == 0;
-        let existing = self.index.get(&key).copied();
-        let mut added = false;
-        let mut removed = false;
-
-        let mut self_slot: Option<usize> = None;
-
-        if is_stopped {
-            if let Some(slot) = existing {
-                self.remove_at(slot as usize);
-                removed = true;
-            }
-        } else {
-            match existing {
-                Some(slot) => {
-                    let s = &mut self.peers[slot as usize];
-                    let was_seeder = s.is_seeder();
-                    s.set_seeder(is_seeder);
-                    s.set_valid_until(now.wrapping_add(max_peer_age));
-                    if was_seeder != is_seeder {
-                        if is_seeder {
-                            self.seeders += 1;
-                        } else {
-                            self.seeders -= 1;
-                        }
-                    }
-                    self_slot = Some(slot as usize);
-                    if let Some(m) = self.peer_ids.as_mut() {
-                        m.insert(key, input.peer_id);
-                    }
-                }
-                None => {
-                    let slot = self.peers.len();
-                    self.peers.push(S::new_slot(
-                        &input.ip,
-                        input.port,
-                        is_seeder,
-                        now.wrapping_add(max_peer_age),
-                    ));
-                    self.index.insert(key, slot as u32);
-                    if is_seeder {
-                        self.seeders += 1;
-                    }
-                    self_slot = Some(slot);
-                    added = true;
-                    if let Some(m) = self.peer_ids.as_mut() {
-                        m.insert(key, input.peer_id);
-                    }
-                }
-            }
-        }
-
+        let (self_slot, added, removed) = self.announce_mutate(input, key, now, max_peer_age);
         let (seeders, leechers) = self.num_peers();
 
-        // Sample up to max_peers + (self present ? 1 : 0) candidates so that
-        // after excluding self we still have a full response when possible.
         let want = max_peers + self_slot.is_some() as usize;
         self.sample_peers(want, self_slot, rng, out);
         out.truncate(max_peers);
@@ -441,14 +732,15 @@ impl<S: Slot> Swarm<S> {
         rng: &mut Rng,
         out: &mut Vec<PeerEndpoint>,
     ) {
-        let len = self.peers.len();
+        let peers = self.peers.as_slice();
+        let len = peers.len();
         if len == 0 || want == 0 {
             return;
         }
         let want = want.min(len);
 
         if want >= len {
-            for (i, p) in self.peers.iter().enumerate() {
+            for (i, p) in peers.iter().enumerate() {
                 if Some(i) != exclude {
                     out.push(p.endpoint());
                 }
@@ -477,7 +769,7 @@ impl<S: Slot> Swarm<S> {
                     continue; // single-element bucket holding only self
                 }
             }
-            out.push(self.peers[idx].endpoint());
+            out.push(peers[idx].endpoint());
             start = end;
         }
     }
@@ -485,30 +777,65 @@ impl<S: Slot> Swarm<S> {
     /// Remove peer at `slot` via swap_remove, fixing the moved element's index.
     fn remove_at(&mut self, slot: usize) {
         let removed = self.peers.swap_remove(slot);
-        if slot < self.peers.len() {
-            let moved_key = self.peers[slot].key();
-            self.index.insert(moved_key, slot as u32);
+        let new_len = self.peers.len();
+        if new_len <= INDEX_THRESHOLD / 2 {
+            self.index = None;
+        } else if let Some(idx) = self.index.as_mut() {
+            let removed_key = removed.key();
+            if let Ok(entry) = idx.find_entry(S::hash_key(&removed_key), |&s| s == slot as u32) {
+                entry.remove();
+            }
+            if slot < new_len {
+                let moved_key = self.peers.as_slice()[slot].key();
+                let old_slot = new_len as u32;
+                if let Some(e) = idx.find_mut(S::hash_key(&moved_key), |&s| s == old_slot) {
+                    *e = slot as u32;
+                }
+            }
         }
-        let removed_key = removed.key();
-        self.index.remove(&removed_key);
         if let Some(m) = self.peer_ids.as_mut() {
+            let removed_key = removed.key();
             m.remove(&removed_key);
         }
         if removed.is_seeder() {
             self.seeders -= 1;
         }
+        if new_len == 0 {
+            self.min_valid_until = u32::MAX;
+        }
     }
 
     /// Expire peers whose valid_until has passed. Returns number removed.
-    /// O(n) with index fixups only for removed/moved peers.
+    /// O(n) with index fixups only for removed/moved peers; O(1) when
+    /// `min_valid_until > now`.
     pub fn clean(&mut self, now: u32) -> usize {
+        if !self.peers.is_empty() && self.min_valid_until > now {
+            return 0;
+        }
         let mut removed = 0usize;
+        let mut next_min = u32::MAX;
         let mut i = self.peers.len();
         while i > 0 {
             i -= 1;
-            if self.peers[i].valid_until() <= now {
+            let v = self.peers.as_slice()[i].valid_until();
+            if v <= now {
                 self.remove_at(i);
                 removed += 1;
+            } else if v < next_min {
+                next_min = v;
+            }
+        }
+        self.min_valid_until = next_min;
+        if removed > 0 {
+            self.peers.shrink_if_sparse();
+            if let Some(idx) = self.index.as_mut() {
+                let len = self.peers.len();
+                if idx.capacity() > 32 && idx.capacity() > len * 4 {
+                    let peers = self.peers.as_slice();
+                    idx.shrink_to(len.max(INDEX_THRESHOLD + 1), |&s| {
+                        S::hash_key(&peers[s as usize].key())
+                    });
+                }
             }
         }
         removed
@@ -523,8 +850,9 @@ impl<S: Slot> Swarm<S> {
     /// lock, so the copy is consistent. Buffer is cleared first.
     pub fn peers_snapshot(&self, out: &mut Vec<PeerSnap>) {
         out.clear();
-        out.reserve(self.peers.len());
-        for p in &self.peers {
+        let peers = self.peers.as_slice();
+        out.reserve(peers.len());
+        for p in peers {
             let e = p.endpoint();
             out.push(PeerSnap {
                 ip: e.ip,
@@ -539,7 +867,26 @@ impl<S: Slot> Swarm<S> {
     /// trigger repeated HashMap rehashes / Vec reallocs.
     pub fn reserve_restore(&mut self, additional: usize) {
         self.peers.reserve(additional);
-        self.index.reserve(additional);
+        let total = self.peers.len().saturating_add(additional);
+        if total > INDEX_THRESHOLD {
+            match self.index.as_mut() {
+                Some(idx) => {
+                    let peers = self.peers.as_slice();
+                    idx.reserve(additional, |&s| S::hash_key(&peers[s as usize].key()));
+                }
+                None => {
+                    let peers = self.peers.as_slice();
+                    let mut idx = Box::new(HashTable::with_capacity(total));
+                    for (i, p) in peers.iter().enumerate() {
+                        let k = p.key();
+                        idx.insert_unique(S::hash_key(&k), i as u32, |&s| {
+                            S::hash_key(&peers[s as usize].key())
+                        });
+                    }
+                    self.index = Some(idx);
+                }
+            }
+        }
         if let Some(m) = self.peer_ids.as_mut() {
             m.reserve(additional);
         }
@@ -557,13 +904,10 @@ impl<S: Slot> Swarm<S> {
         let Some(key) = S::key_for(ip, port) else {
             return false;
         };
-        if self.index.contains_key(&key) {
+        if self.find_slot(&key).is_some() {
             return false;
         }
-        let slot = self.peers.len();
-        self.peers
-            .push(S::new_slot(ip, port, seeder, valid_until));
-        self.index.insert(key, slot as u32);
+        self.insert_slot(S::new_slot(ip, port, seeder, valid_until));
         if seeder {
             self.seeders += 1;
         }
@@ -587,6 +931,19 @@ pub type FamilyTotals = ((u64, u64, u64, u64), (u64, u64, u64, u64));
 // FamilyStore: sharded map of infohash -> swarm, per IP family
 // ---------------------------------------------------------------------------
 
+/// Cache-line padded shard RwLock to prevent false sharing between workers
+/// locking adjacent shards.
+#[repr(align(64))]
+struct AlignedShard<S: Slot>(RwLock<HashMap<InfoHash, RwLock<Swarm<S>>>>);
+
+impl<S: Slot> std::ops::Deref for AlignedShard<S> {
+    type Target = RwLock<HashMap<InfoHash, RwLock<Swarm<S>>>>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Per-shard statistics snapshot (written by cleaner, read by stats API).
 #[derive(Default)]
 pub struct ShardStats {
@@ -597,7 +954,7 @@ pub struct ShardStats {
 }
 
 pub struct FamilyStore<S: Slot> {
-    shards: Vec<RwLock<HashMap<InfoHash, RwLock<Swarm<S>>>>>,
+    shards: Vec<AlignedShard<S>>,
     /// store_peer_id propagated to new swarms
     store_peer_id: bool,
     /// Per-shard stats slots, parallel to `shards`.
@@ -621,7 +978,7 @@ impl<S: Slot> FamilyStore<S> {
         let n = num_shards.next_power_of_two().max(1);
         Self {
             shards: (0..n)
-                .map(|_| RwLock::new(HashMap::new()))
+                .map(|_| AlignedShard(RwLock::new(HashMap::new())))
                 .collect(),
             store_peer_id,
             shard_stats: (0..n).map(|_| ShardStats::default()).collect(),
@@ -637,9 +994,14 @@ impl<S: Slot> FamilyStore<S> {
 
     #[inline]
     fn shard_index(&self, info_hash: &InfoHash) -> usize {
-        // first 8 bytes of SHA1 infohash are uniform
-        let x = u64::from_le_bytes(info_hash[..8].try_into().unwrap());
-        (x as usize) & (self.shards.len() - 1)
+        // Mix all 20 bytes so both uniform SHA1s and synthetic/sequential
+        // hashes (e.g. benchmark hashes varying only in bytes 0..4) spread
+        // evenly across all shards.
+        let a = u64::from_ne_bytes(info_hash[0..8].try_into().unwrap());
+        let b = u64::from_ne_bytes(info_hash[8..16].try_into().unwrap());
+        let c = u32::from_ne_bytes(info_hash[16..20].try_into().unwrap()) as u64;
+        let h = (a ^ b.rotate_left(29) ^ c).wrapping_mul(0x9E3779B97F4A7C15);
+        ((h >> 32) as usize ^ (h as usize)) & (self.shards.len() - 1)
     }
 
     pub fn num_shards(&self) -> usize {
@@ -658,37 +1020,66 @@ impl<S: Slot> FamilyStore<S> {
         rng: &mut Rng,
         out: &mut Vec<PeerEndpoint>,
     ) -> Option<(u32, u32, bool, bool)> {
-        if S::key_for(&input.ip, input.port).is_none() {
-            return None;
-        }
+        let key = S::key_for(&input.ip, input.port)?;
         let shard = &self.shards[self.shard_index(info_hash)];
 
         // Fast path: existing torrent — shared shard read lock throughout.
         let fast = {
             let r = shard.read();
-            r.get(info_hash).map(|lock| {
+            if let Some(lock) = r.get(info_hash) {
+                if input.event != AnnounceEvent::Stopped && !self.store_peer_id {
+                    let swarm = lock.read();
+                    if let Some(res) = swarm.try_announce_read(
+                        input,
+                        &key,
+                        now,
+                        max_peer_age,
+                        max_peers,
+                        rng,
+                        out,
+                    ) {
+                        return Some(res);
+                    }
+                }
                 let mut swarm = lock.write();
-                swarm.announce(input, now, max_peer_age, max_peers, rng, out)
-            })
+                let (self_slot, added, removed) =
+                    swarm.announce_mutate(input, key, now, max_peer_age);
+                let swarm = RwLockWriteGuard::downgrade(swarm);
+                out.clear();
+                let (seeders, leechers) = swarm.num_peers();
+                let want = max_peers + self_slot.is_some() as usize;
+                swarm.sample_peers(want, self_slot, rng, out);
+                out.truncate(max_peers);
+                Some((seeders, leechers, added, removed))
+            } else if input.event == AnnounceEvent::Stopped {
+                out.clear();
+                return Some((0, 0, false, false));
+            } else {
+                None
+            }
         };
         let res = match fast {
             Some(r) => Some(r),
             None => {
                 // Slow path: create torrent — exclusive shard write lock (brief).
                 let mut w = shard.write();
-                match w.entry(*info_hash) {
-                    hashbrown::hash_map::Entry::Occupied(e) => {
-                        let mut swarm = e.get().write();
-                        Some(swarm.announce(input, now, max_peer_age, max_peers, rng, out))
-                    }
+                let lock = match w.entry(*info_hash) {
+                    hashbrown::hash_map::Entry::Occupied(e) => e.into_mut(),
                     hashbrown::hash_map::Entry::Vacant(e) => {
                         self.torrents_live.fetch_add(1, Ordering::Relaxed);
                         self.torrents_created.fetch_add(1, Ordering::Relaxed);
-                        let lock = e.insert(RwLock::new(Swarm::new(self.store_peer_id)));
-                        let mut swarm = lock.write();
-                        Some(swarm.announce(input, now, max_peer_age, max_peers, rng, out))
+                        e.insert(RwLock::new(Swarm::new(self.store_peer_id)))
                     }
-                }
+                };
+                let mut swarm = lock.write();
+                let (self_slot, added, removed) =
+                    swarm.announce_mutate(input, key, now, max_peer_age);
+                let (seeders, leechers) = swarm.num_peers();
+                out.clear();
+                let want = max_peers + self_slot.is_some() as usize;
+                swarm.sample_peers(want, self_slot, rng, out);
+                out.truncate(max_peers);
+                Some((seeders, leechers, added, removed))
             }
         };
         if let Some((_, _, added, removed)) = res {
@@ -744,10 +1135,21 @@ impl<S: Slot> FamilyStore<S> {
         let mut seeders = 0u64;
 
         // Phase 1: shared read lock — announces proceed concurrently;
-        // only per-swarm write locks are taken briefly.
+        // unexpired swarms are skipped under a shared swarm read lock without
+        // taking a swarm write lock or touching the peer slice.
         {
             let r = shard.read();
             for (hash, lock) in r.iter() {
+                {
+                    let swarm = lock.read();
+                    if !swarm.needs_clean(now) {
+                        torrents += 1;
+                        let (s, l) = swarm.num_peers();
+                        peers += (s + l) as u64;
+                        seeders += s as u64;
+                        continue;
+                    }
+                }
                 let mut swarm = lock.write();
                 peers_removed += swarm.clean(now) as u64;
                 if swarm.is_empty() {
@@ -761,17 +1163,17 @@ impl<S: Slot> FamilyStore<S> {
             }
         }
 
-        // Phase 2: exclusive write lock — remove verified-empty torrents.
+        // Phase 2: exclusive write lock — remove verified-empty torrents in
+        // bounded chunks so a large wave of expirations never holds the shard
+        // write lock long enough to stall announces.
         let mut torrents_removed = 0u64;
-        if !empty.is_empty() {
+        for chunk in empty.chunks(512) {
             let mut w = shard.write();
-            for hash in empty {
-                if let Some(lock) = w.get_mut(&hash) {
-                    // &mut RwLock -> &mut Swarm; safe because shard.write()
-                    // excludes all readers, so no swarm guard can be held.
+            for hash in chunk {
+                if let Some(lock) = w.get_mut(hash) {
                     let swarm = lock.get_mut();
                     if swarm.is_empty() {
-                        w.remove(&hash);
+                        w.remove(hash);
                         torrents_removed += 1;
                     }
                 }
@@ -949,12 +1351,13 @@ impl<S: Slot> FamilyStore<S> {
 impl<S: Slot> Swarm<S> {
     fn sample_for_api(&self, max_peers: usize, out: &mut Vec<(PeerEndpoint, bool)>) {
         out.clear();
-        if self.peers.is_empty() || max_peers == 0 {
+        let peers = self.peers.as_slice();
+        if peers.is_empty() || max_peers == 0 {
             return;
         }
         // For an admin API, "first N" is acceptable and cheapest; peer order
         // is already arbitrary due to swap_remove churn.
-        for p in self.peers.iter().take(max_peers) {
+        for p in peers.iter().take(max_peers) {
             out.push((p.endpoint(), p.is_seeder()));
         }
     }
@@ -1089,20 +1492,24 @@ impl Store {
     pub fn memory_estimate_bytes(&self) -> u64 {
         let (t4, p4, _, _) = self.v4.totals();
         let (t6, p6, _, _) = self.v6.totals();
-        // Per peer: slot in the dense Vec + one entry in the swarm's
-        // index HashMap (key + u32 slot index + 1B control, at hashbrown's
-        // ~87.5% max load => x8/7). peer_ids adds key + 20B PeerId + ctrl.
+        // Per peer: slot in the dense Vec + one 4B u32 entry in the swarm's
+        // HashTable<u32> index (u32 slot index + 1B control, at hashbrown's
+        // ~87.5% max load => x8/7; 0 for swarms <= INDEX_THRESHOLD).
+        let idx_entry = (4 + 1) * 8 / 7;
         let key4 = std::mem::size_of::<u64>() as u64;
         let key6 = std::mem::size_of::<Key6>() as u64;
-        let idx4 = (key4 + 4 + 1) * 8 / 7;
-        let idx6 = (key6 + 4 + 1) * 8 / 7;
         let pid4 = (key4 + 20 + 1) * 8 / 7;
         let pid6 = (key6 + 20 + 1) * 8 / 7;
-        let mut bytes = p4 * (std::mem::size_of::<Slot4>() as u64 + idx4)
-            + p6 * (std::mem::size_of::<Slot6>() as u64 + idx6);
-        // Per-torrent: InfoHash key + HashMap node + RwLock<Swarm> header.
-        let torrent_overhead = (std::mem::size_of::<InfoHash>() + 232) as u64;
-        bytes += (t4 + t6) * torrent_overhead;
+        let mut bytes = p4 * (std::mem::size_of::<Slot4>() as u64 + idx_entry)
+            + p6 * (std::mem::size_of::<Slot6>() as u64 + idx_entry);
+        // Per-torrent: InfoHash key + RwLock<Swarm> header + control byte.
+        let torrent_overhead4 = (std::mem::size_of::<InfoHash>()
+            + std::mem::size_of::<RwLock<Swarm<Slot4>>>()
+            + 8) as u64;
+        let torrent_overhead6 = (std::mem::size_of::<InfoHash>()
+            + std::mem::size_of::<RwLock<Swarm<Slot6>>>()
+            + 8) as u64;
+        bytes += t4 * torrent_overhead4 + t6 * torrent_overhead6;
         if self.store_peer_id {
             bytes += p4 * pid4 + p6 * pid6;
         }
@@ -1316,5 +1723,92 @@ mod tests {
         let mut cur = std::io::Cursor::new(&buf);
         let (_t, p) = store2.load_snapshot(&mut cur).unwrap();
         assert_eq!(p, 0); // expired peer skipped
+    }
+
+    #[test]
+    fn swarm_compact_layout_and_transitions() {
+        assert!(std::mem::size_of::<Swarm<Slot4>>() <= 56);
+        assert!(std::mem::size_of::<RwLock<Swarm<Slot4>>>() <= 64);
+
+        let mut swarm = Swarm::<Slot4>::new(false);
+        let mut rng = Rng::new();
+        let mut out = Vec::new();
+
+        // 1..=INLINE_CAP stay inline with no index
+        for i in 1..=INLINE_CAP {
+            let input = AnnounceInput::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8)),
+                6881,
+                [0u8; 20],
+                if i == 1 { 0 } else { 100 },
+                AnnounceEvent::Started,
+                50,
+            );
+            swarm.announce(&input, 1000, 1800, 50, &mut rng, &mut out);
+        }
+        assert!(matches!(swarm.peers, PeerVec::Inline { .. }));
+        assert!(swarm.index.is_none());
+        assert_eq!(swarm.num_peers(), (1, (INLINE_CAP - 1) as u32));
+
+        // 3..=INDEX_THRESHOLD spill to Heap Vec but still no index HashTable
+        for i in (INLINE_CAP + 1)..=INDEX_THRESHOLD {
+            let input = AnnounceInput::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8)),
+                6881,
+                [0u8; 20],
+                100,
+                AnnounceEvent::Started,
+                50,
+            );
+            swarm.announce(&input, 1000, 1800, 50, &mut rng, &mut out);
+        }
+        assert!(matches!(swarm.peers, PeerVec::Heap(_)));
+        assert!(swarm.index.is_none());
+        assert_eq!(swarm.len(), INDEX_THRESHOLD);
+
+        // > INDEX_THRESHOLD builds the HashTable<u32> index
+        for i in (INDEX_THRESHOLD + 1)..=20 {
+            let input = AnnounceInput::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8)),
+                6881,
+                [0u8; 20],
+                100,
+                AnnounceEvent::Started,
+                50,
+            );
+            swarm.announce(&input, 2000, 1800, 50, &mut rng, &mut out);
+        }
+        assert!(swarm.index.is_some());
+        assert_eq!(swarm.len(), 20);
+
+        // Expire first 19 peers -> shrinks back to Inline and drops index
+        let expired_input = AnnounceInput::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 20)),
+            6881,
+            [0u8; 20],
+            0,
+            AnnounceEvent::Completed,
+            50,
+        );
+        swarm.announce(&expired_input, 5000, 1800, 50, &mut rng, &mut out);
+        let removed = swarm.clean(4000);
+        assert_eq!(removed, 19);
+        assert_eq!(swarm.len(), 1);
+        assert!(matches!(swarm.peers, PeerVec::Inline { .. }));
+        assert!(swarm.index.is_none());
+        assert_eq!(swarm.num_peers(), (1, 0));
+    }
+
+    #[test]
+    fn sequential_hashes_spread_across_shards() {
+        let store = FamilyStore::<Slot4>::new(256, false);
+        let mut counts = vec![0usize; 256];
+        for t in 0..500u32 {
+            let mut h = [0x42u8; 20];
+            h[0..4].copy_from_slice(&t.to_be_bytes());
+            counts[store.shard_index(&h)] += 1;
+        }
+        let non_empty = counts.iter().filter(|&&c| c > 0).count();
+        assert!(non_empty > 200, "expected spread across shards, got {non_empty}/256");
     }
 }

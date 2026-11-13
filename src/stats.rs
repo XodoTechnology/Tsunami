@@ -67,7 +67,7 @@ const CLIENT_STRIPES: usize = 256;
 pub type ClientKey = [u8; 8];
 
 pub struct ClientStats {
-    stripes: Vec<Mutex<std::collections::HashMap<ClientKey, u64>>>,
+    stripes: Vec<parking_lot::Mutex<hashbrown::HashMap<ClientKey, u64>>>,
     /// peer_id prefixes excluded from stats (e.g. loadgen's "-TS").
     ignore: std::sync::OnceLock<Vec<Vec<u8>>>,
 }
@@ -76,7 +76,7 @@ impl ClientStats {
     pub fn new() -> Self {
         Self {
             stripes: (0..CLIENT_STRIPES)
-                .map(|_| Mutex::new(std::collections::HashMap::new()))
+                .map(|_| parking_lot::Mutex::new(hashbrown::HashMap::new()))
                 .collect(),
             ignore: std::sync::OnceLock::new(),
         }
@@ -89,27 +89,44 @@ impl ClientStats {
         let _ = self.ignore.set(v);
     }
 
+    #[inline]
+    pub fn is_ignored(&self, peer_id: &[u8; 20]) -> bool {
+        if let Some(ign) = self.ignore.get() {
+            ign.iter()
+                .any(|p| peer_id.as_slice().starts_with(p.as_slice()))
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn add_batch(&self, key: ClientKey, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let h = u64::from_ne_bytes(key).wrapping_mul(0x9E3779B97F4A7C15);
+        let stripe = ((h >> 56) as usize) & (CLIENT_STRIPES - 1);
+        let mut m = self.stripes[stripe].lock();
+        *m.entry(key).or_insert(0) += count;
+    }
+
     /// Record an announce for a peer client, keyed by the 8-byte client
     /// signature at the start of peer_id.
     #[inline]
     pub fn record(&self, peer_id: &[u8; 20]) {
-        if let Some(ign) = self.ignore.get() {
-            if ign.iter().any(|p| peer_id.as_slice().starts_with(p.as_slice())) {
-                return;
-            }
+        if self.is_ignored(peer_id) {
+            return;
         }
         let mut key = [0u8; 8];
         key.copy_from_slice(&peer_id[..8]);
-        let stripe = (key[0] as usize ^ ((key[1] as usize) << 4)) & (CLIENT_STRIPES - 1);
-        let mut m = self.stripes[stripe].lock().unwrap();
-        *m.entry(key).or_insert(0) += 1;
+        self.add_batch(key, 1);
     }
 
     /// Top clients by announce count.
     pub fn top(&self, n: usize) -> Vec<(ClientKey, u64)> {
         let mut all: Vec<(ClientKey, u64)> = Vec::new();
         for stripe in &self.stripes {
-            let m = stripe.lock().unwrap();
+            let m = stripe.lock();
             all.extend(m.iter().map(|(&k, &v)| (k, v)));
         }
         all.sort_unstable_by(|a, b| b.1.cmp(&a.1));

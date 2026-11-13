@@ -91,6 +91,43 @@ impl LocalStats {
     }
 }
 
+#[derive(Default)]
+struct LocalClientStats {
+    entries: [(crate::stats::ClientKey, u32); 8],
+    len: usize,
+}
+
+impl LocalClientStats {
+    #[inline]
+    fn record(&mut self, peer_id: &[u8; 20], cs: &crate::stats::ClientStats) {
+        if cs.is_ignored(peer_id) {
+            return;
+        }
+        let mut key = [0u8; 8];
+        key.copy_from_slice(&peer_id[..8]);
+        for i in 0..self.len {
+            if self.entries[i].0 == key {
+                self.entries[i].1 += 1;
+                return;
+            }
+        }
+        if self.len == self.entries.len() {
+            self.flush_into(cs);
+        }
+        self.entries[self.len] = (key, 1);
+        self.len += 1;
+    }
+
+    #[inline]
+    fn flush_into(&mut self, cs: &crate::stats::ClientStats) {
+        for i in 0..self.len {
+            let (k, c) = self.entries[i];
+            cs.add_batch(k, c as u64);
+        }
+        self.len = 0;
+    }
+}
+
 /// Persistent msghdr used by RecvMsgOut::parse to locate the sockaddr that
 /// recvmsg wrote next to the payload in the provided buffer.
 /// The pointed-to allocations are never freed (worker-lifetime).
@@ -167,9 +204,7 @@ impl RecvHelper {
             if name.len() < std::mem::size_of::<libc::sockaddr_in>() {
                 return None;
             }
-            // Safety: name is the sockaddr_in the kernel wrote; it is
-            // aligned because buf is 4096-aligned and name_off=16.
-            let sa = unsafe { *(name.as_ptr() as *const libc::sockaddr_in) };
+            let sa = unsafe { (name.as_ptr() as *const libc::sockaddr_in).read_unaligned() };
             if sa.sin_port == 0 {
                 return None;
             }
@@ -181,7 +216,7 @@ impl RecvHelper {
             if name.len() < std::mem::size_of::<libc::sockaddr_in6>() {
                 return None;
             }
-            let sa = unsafe { *(name.as_ptr() as *const libc::sockaddr_in6) };
+            let sa = unsafe { (name.as_ptr() as *const libc::sockaddr_in6).read_unaligned() };
             if sa.sin6_port == 0 {
                 return None;
             }
@@ -213,6 +248,7 @@ pub struct Worker {
     scrape_scratch: Vec<(i32, i32, i32)>,
     local_v4: LocalStats,
     local_v6: LocalStats,
+    local_clients: LocalClientStats,
     rl: crate::ratelimit::RateLimiter,
     ip_limiter: Arc<crate::ratelimit::IpConnectLimiter>,
     // --- provided-buffer-ring overflow recovery ---
@@ -230,15 +266,11 @@ pub struct Worker {
     /// Provided-buffer ring geometry, retained so a rebuild matches the
     /// original allocation (bgid + entry count + buffer length).
     buf_ring_entries: u16,
+    rx_buf_len: usize,
     _sockets: Vec<socket2::Socket>,
 }
 
 impl Worker {
-    #[inline]
-    fn now(&self) -> u32 {
-        self.now_unix
-    }
-
     #[inline]
     fn local_mut(&mut self, is_v4_sock: bool) -> &mut LocalStats {
         if is_v4_sock {
@@ -286,6 +318,23 @@ impl Worker {
         }
     }
 
+    #[inline]
+    fn handle_send_cqe(&mut self, cqe: io_uring::cqueue::Entry) {
+        let ud = cqe.user_data();
+        let is_v6 = ud & send_buffers::SEND_V6 != 0;
+        let idx = (ud & !send_buffers::SEND_V6) as usize;
+        let res = cqe.result();
+        if res < 0 {
+            log::error!("sendmsg failed: {}", std::io::Error::from_raw_os_error(-res));
+        }
+        unsafe { self.send_buffers.mark_free(idx) };
+        if res > 0 {
+            // L3+L4 header overhead: IPv4=20+8, IPv6=40+8.
+            let hdr = if is_v6 { 48u64 } else { 28u64 };
+            self.local_mut(!is_v6).bytes_tx += res as u64 + hdr;
+        }
+    }
+
     fn handle_cqe(&mut self, cqe: io_uring::cqueue::Entry, rearm: &mut Vec<io_uring::squeue::Entry>) {
         let ud = cqe.user_data();
         if ud == USER_DATA_RECV_V4 || ud == USER_DATA_RECV_V6 {
@@ -318,19 +367,7 @@ impl Worker {
                 self.drain_mask &= if ud == USER_DATA_CANCEL_V4 { !1 } else { !2 };
             }
         } else {
-            // sendmsg completion: user_data = buffer index | SEND_V6 flag
-            let is_v6 = ud & send_buffers::SEND_V6 != 0;
-            let idx = (ud & !send_buffers::SEND_V6) as usize;
-            let res = cqe.result();
-            if res < 0 {
-                log::error!("sendmsg failed: {}", std::io::Error::from_raw_os_error(-res));
-            }
-            unsafe { self.send_buffers.mark_free(idx) };
-            if res > 0 {
-                // L3+L4 header overhead: IPv4=20+8, IPv6=40+8.
-                let hdr = if is_v6 { 48u64 } else { 28u64 };
-                self.local_mut(!is_v6).bytes_tx += res as u64 + hdr;
-            }
+            self.handle_send_cqe(cqe);
         }
     }
 
@@ -375,6 +412,7 @@ impl Worker {
 
     fn dispatch(&mut self, addr: SocketAddr, payload: &[u8], is_v4_sock: bool) {
         let ip = addr.ip();
+        let now = self.now_unix;
         match protocol::parse_request(payload, self.config.protocol.max_scrape_torrents) {
             ParseResult::Ok(ParsedRequest::Connect { transaction_id }) => {
                 if !self.ip_limiter.allow(ip) {
@@ -382,7 +420,7 @@ impl Worker {
                     return;
                 }
                 self.local_mut(is_v4_sock).connects += 1;
-                let conn_id = self.validator.create(ip);
+                let conn_id = self.validator.create_at(ip, now);
                 self.emit_simple(addr, is_v4_sock, move |b| {
                     protocol::write_connect_response(b, transaction_id, conn_id)
                 });
@@ -396,7 +434,7 @@ impl Worker {
                     self.local_mut(is_v4_sock).blocked += 1;
                     return;
                 }
-                if !self.validator.valid(ip, req.connection_id) {
+                if !self.validator.valid_at(ip, req.connection_id, now) {
                     return;
                 }
                 if req.port == 0 {
@@ -420,7 +458,8 @@ impl Worker {
                 }
                 self.local_mut(is_v4_sock).announces += 1;
                 if self.config.protocol.client_stats {
-                    self.stats.client_stats.record(&req.peer_id);
+                    self.local_clients
+                        .record(&req.peer_id, &self.stats.client_stats);
                 }
                 let event = AnnounceEvent::from_wire(req.event as i32);
                 match event {
@@ -429,7 +468,6 @@ impl Worker {
                     AnnounceEvent::Stopped => self.local_mut(is_v4_sock).ev_stopped += 1,
                     AnnounceEvent::None => {}
                 }
-                let now = self.now();
                 let txid = req.transaction_id;
                 let (ip, port, peer_id, left, numwant) =
                     (ip, req.port, req.peer_id, req.left, req.numwant);
@@ -497,7 +535,7 @@ impl Worker {
                 transaction_id,
                 hashes,
             }) => {
-                if !self.validator.valid(ip, connection_id) {
+                if !self.validator.valid_at(ip, connection_id, now) {
                     return;
                 }
                 if !self.rl.allow_scrape() {
@@ -526,7 +564,7 @@ impl Worker {
                 transaction_id,
                 message,
             }) => {
-                if self.validator.valid(ip, connection_id) {
+                if self.validator.valid_at(ip, connection_id, now) {
                     self.local_mut(is_v4_sock).errors += 1;
                     self.emit_simple(addr, is_v4_sock, move |b| {
                         protocol::write_error_response(b, transaction_id, message)
@@ -622,7 +660,7 @@ impl Worker {
         if let Err(e) = ring.submitter().unregister_buf_ring(bgid) {
             log::warn!("unregister_buf_ring({bgid}): {e}");
         }
-        let new_ring = match BufRing::new(bgid, entries, REQUEST_BUF_LEN) {
+        let new_ring = match BufRing::new(bgid, entries, self.rx_buf_len) {
             Ok(r) => r,
             Err(e) => {
                 log::error!("RX ring rebuild alloc failed: {e}");
@@ -660,6 +698,7 @@ impl Worker {
 
     fn run_inner(&mut self, ring: &mut IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry>) {
         let mut rearm: Vec<io_uring::squeue::Entry> = Vec::new();
+        let mut recv_cqes: Vec<io_uring::cqueue::Entry> = Vec::with_capacity(1024);
         // Debug/testing hook: force one RX-ring rebuild through the real
         // cancel->drain->re-register path (off unless TSUNAMI_DEBUG_REBUILD set).
         if std::env::var_os("TSUNAMI_DEBUG_REBUILD").is_some() {
@@ -677,41 +716,78 @@ impl Worker {
             log::warn!("TSUNAMI_DEBUG_REBUILD: forcing RX buffer-ring rebuild");
         }
         loop {
-            {
-                let mut sq = ring.submission();
-                // Control-plane SQEs (recv resubmits, ring-rebuild cancels)
-                // go first: a SQ full of pending sends must never starve
-                // them, or the recv multishot is silently lost forever.
-                let mut retry = Vec::new();
-                for e in rearm.drain(..) {
-                    if unsafe { sq.push(&e) }.is_err() {
-                        retry.push(e);
-                    }
-                }
-                rearm = retry;
-                let mut space = sq.capacity().saturating_sub(sq.len());
-                while space > 0 {
-                    match self.pending_entries.pop_front() {
-                        Some(e) => {
-                            // Safety: single-threaded submission queue.
-                            if unsafe { sq.push(&e) }.is_err() {
-                                self.pending_entries.push_front(e);
-                                break;
-                            }
-                            space -= 1;
+            loop {
+                {
+                    let mut sq = ring.submission();
+                    // Control-plane SQEs (recv resubmits, ring-rebuild cancels)
+                    // go first: a SQ full of pending sends must never starve
+                    // them, or the recv multishot is silently lost forever.
+                    let mut retry = Vec::new();
+                    for e in rearm.drain(..) {
+                        if unsafe { sq.push(&e) }.is_err() {
+                            retry.push(e);
                         }
-                        None => break,
+                    }
+                    rearm = retry;
+                    let mut space = sq.capacity().saturating_sub(sq.len());
+                    while space > 0 {
+                        match self.pending_entries.pop_front() {
+                            Some(e) => {
+                                // Safety: single-threaded submission queue.
+                                if unsafe { sq.push(&e) }.is_err() {
+                                    self.pending_entries.push_front(e);
+                                    break;
+                                }
+                                space -= 1;
+                            }
+                            None => break,
+                        }
                     }
                 }
+                // If a flood batch generated more responses than fit in a
+                // single SQ, flush the full SQ immediately and reclaim
+                // completed send buffers before queuing the remainder.
+                if self.pending_entries.is_empty() {
+                    break;
+                }
+                if ring.submitter().submit().is_err() {
+                    break;
+                }
+                for cqe in ring.completion() {
+                    if cqe.user_data() < USER_DATA_CANCEL_V6 {
+                        self.handle_send_cqe(cqe);
+                    } else {
+                        recv_cqes.push(cqe);
+                    }
+                }
+                self.poll_overflow(ring, &mut rearm);
             }
 
-            if ring.submitter().submit_and_wait(1).is_err() {
+            let wait_nr = if recv_cqes.is_empty() { 1 } else { 0 };
+            if ring.submitter().submit_and_wait(wait_nr).is_err() {
                 log::error!("io_uring submit failed");
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
             }
 
+            // Refresh cached UNIX timestamp on wakeup before dispatching CQEs.
+            self.now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0);
+
+            // Reclaim completed send buffers first so incoming requests in
+            // this batch reuse cache-hot buffers from the LIFO free list
+            // instead of allocating new buffers or dropping responses.
             for cqe in ring.completion() {
+                if cqe.user_data() < USER_DATA_CANCEL_V6 {
+                    self.handle_send_cqe(cqe);
+                } else {
+                    recv_cqes.push(cqe);
+                }
+            }
+
+            for cqe in recv_cqes.drain(..) {
                 self.handle_cqe(cqe, &mut rearm);
             }
 
@@ -721,17 +797,15 @@ impl Worker {
             let stats_v4 = &self.stats;
             self.local_v4.flush_into(&stats_v4.udp_ipv4, stats_v4);
             self.local_v6.flush_into(&stats_v4.udp_ipv6, stats_v4);
+            if self.config.protocol.client_stats {
+                self.local_clients.flush_into(&stats_v4.client_stats);
+            }
             if self.cqe_overflow_pending > 0 {
                 stats_v4
                     .cqe_overflow
                     .fetch_add(self.cqe_overflow_pending, Ordering::Relaxed);
                 self.cqe_overflow_pending = 0;
             }
-            // refresh the shared-clock timestamp once per iteration
-            self.now_unix = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as u32)
-                .unwrap_or(0);
         }
     }
 }
@@ -836,15 +910,17 @@ fn worker_main(
         .filter(|&n| n >= 64)
         .map(|n| n.next_power_of_two())
         .unwrap_or_else(|| (ring_entries.saturating_mul(16)).clamp(16384, 65536));
-    // More provided RX buffers than SQ slots so the kernel can absorb bursts
-    // before ENOBUFS-shedding; each is REQUEST_BUF_LEN bytes. 2x is enough —
-    // a transient ENOBUFS now recovers via multishot rearm, so don't overpay
-    // ~16MB/worker of idle buffer memory for headroom we rarely need.
-    let buf_ring_entries =
-        (ring_entries.saturating_mul(2)).clamp(2048, 16384).next_power_of_two() as u16;
-    // Bound the send pool independently — PENDING_SEND_MAX caps in-flight
-    // sends anyway, so a huge ring_size shouldn't multiply send memory.
-    let send_capacity = ring_entries.min(PENDING_SEND_MAX);
+    // Provided RX buffers are recycled immediately after each datagram is
+    // dispatched; 512..1024 entries per worker keeps the entire RX ring hot
+    // in L3 cache and cuts per-worker RSS while absorbing wakeup bursts.
+    let buf_ring_entries = ring_entries.clamp(512, 1024).next_power_of_two() as u16;
+    let rx_buf_len = (64 + config.protocol.max_scrape_torrents * 20)
+        .clamp(512, REQUEST_BUF_LEN)
+        .next_multiple_of(64);
+    // SendBuffers grows lazily on demand up to PENDING_SEND_MAX, so idle/sustain
+    // workers only allocate their active working set (~32 buffers) while flood
+    // bursts never drop responses due to pool exhaustion.
+    let send_capacity = ring_entries.max(2048).min(PENDING_SEND_MAX);
 
     let sock_v4 = if config.network.use_ipv4 {
         Some(create_socket(
@@ -873,7 +949,7 @@ fn worker_main(
         sock_v6.as_ref().map(|s| s.as_raw_fd()).unwrap_or(-1),
     ])?;
 
-    let buf_ring = BufRing::new(0, buf_ring_entries, REQUEST_BUF_LEN)?;
+    let buf_ring = BufRing::new(0, buf_ring_entries, rx_buf_len)?;
     // Safety: buf_ring memory is owned by this worker and outlives the ring.
     unsafe { buf_ring.register(&ring.submitter()) }?;
 
@@ -921,6 +997,7 @@ fn worker_main(
         scrape_scratch: Vec::with_capacity(128),
         local_v4: LocalStats::default(),
         local_v6: LocalStats::default(),
+        local_clients: LocalClientStats::default(),
         rl,
         ip_limiter,
         recv_live_v4: live_v4,
@@ -931,6 +1008,7 @@ fn worker_main(
         cqe_overflow_pending: 0,
         last_cq_overflow: 0,
         buf_ring_entries,
+        rx_buf_len,
         _sockets: sock_v4
             .into_iter()
             .chain(sock_v6.into_iter())

@@ -9,7 +9,9 @@ use std::ptr::{addr_of_mut, null_mut};
 use io_uring::opcode::SendMsg;
 use io_uring::types::Fixed;
 
-pub const RESPONSE_BUF_LEN: usize = 4096;
+pub const RESPONSE_BUF_LEN: usize = 1920;
+
+const INITIAL_WARM_BUFFERS: usize = 32;
 
 const SOCKET_V4: Fixed = Fixed(0);
 const SOCKET_V6: Fixed = Fixed(1);
@@ -69,24 +71,35 @@ pub struct SendBuffers {
     in_use: Vec<bool>,
     /// Stack of allocatable indices — O(1) alloc/free, no scanning.
     free_list: Vec<u32>,
+    max_capacity: usize,
 }
 
 impl SendBuffers {
     pub fn new(capacity: usize) -> Self {
-        let bufs = (0..capacity).map(|_| SendBuffer::new()).collect();
+        let warm = capacity.min(INITIAL_WARM_BUFFERS);
+        let mut bufs = Vec::with_capacity(capacity);
+        for _ in 0..warm {
+            bufs.push(SendBuffer::new());
+        }
+        let mut free_list = Vec::with_capacity(capacity);
+        for i in (0..warm as u32).rev() {
+            free_list.push(i);
+        }
         Self {
             bufs,
-            in_use: vec![false; capacity],
-            free_list: (0..capacity as u32).rev().collect(),
+            in_use: vec![false; warm],
+            free_list,
+            max_capacity: capacity,
         }
     }
 
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.bufs.len()
+        self.max_capacity
     }
 
-    /// Pop a free buffer index (LIFO — recently freed buffers stay cache-hot).
+    /// Pop a free buffer index (LIFO — recently freed buffers stay cache-hot),
+    /// lazily allocating a new `SendBuffer` on demand up to `max_capacity`.
     #[inline]
     pub fn alloc(&mut self) -> Option<usize> {
         while let Some(idx) = self.free_list.pop() {
@@ -95,6 +108,12 @@ impl SendBuffers {
                 self.in_use[i] = true;
                 return Some(i);
             }
+        }
+        if self.bufs.len() < self.max_capacity {
+            let i = self.bufs.len();
+            self.bufs.push(SendBuffer::new());
+            self.in_use.push(true);
+            return Some(i);
         }
         None
     }

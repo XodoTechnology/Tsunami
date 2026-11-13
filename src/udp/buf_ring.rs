@@ -8,7 +8,6 @@
 //! Adapted from the tokio-uring buf_ring design (MIT), simplified for a
 //! fixed buffer size and single consumer.
 
-use std::alloc::Layout;
 use std::cell::Cell;
 use std::io;
 use std::rc::Rc;
@@ -101,7 +100,7 @@ struct RawBufRing {
     ring_entries_mask: u16,
     buf_cnt: u16,
     buf_len: usize,
-    layout: Layout,
+    mmap_len: usize,
     ring_addr: *mut BufRingEntry,
     buffers_addr: *mut u8,
     local_tail: Cell<u16>,
@@ -122,14 +121,25 @@ impl RawBufRing {
         let entry_size = std::mem::size_of::<BufRingEntry>();
         let ring_size = entry_size * ring_entries as usize;
         let buf_size = buf_len * buf_cnt as usize;
-        let layout = Layout::from_size_align(ring_size + buf_size, 4096)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let mmap_len = ring_size + buf_size;
 
-        // Safety: layout has nonzero size; alloc_zeroed returns null on failure.
-        let base = unsafe { std::alloc::alloc_zeroed(layout) };
-        if base.is_null() {
-            return Err(io::Error::new(io::ErrorKind::OutOfMemory, "buf_ring alloc"));
+        // Allocate via anonymous mmap: guaranteed page-aligned for io_uring,
+        // demand-zeroed by the kernel without upfront memset, and returned to
+        // the OS immediately on munmap when a ring is rebuilt.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mmap_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
         }
+        let base = base as *mut u8;
         let ring_addr = base as *mut BufRingEntry;
         let buffers_addr = unsafe { base.add(ring_size) };
         // Safety: tail() computes the tail field address inside the ring.
@@ -141,7 +151,7 @@ impl RawBufRing {
             ring_entries_mask: ring_entries - 1,
             buf_cnt,
             buf_len,
-            layout,
+            mmap_len,
             ring_addr,
             buffers_addr,
             local_tail: Cell::new(0),
@@ -212,7 +222,9 @@ impl RawBufRing {
 
 impl Drop for RawBufRing {
     fn drop(&mut self) {
-        // Safety: layout/ptr pairing is correct.
-        unsafe { std::alloc::dealloc(self.ring_addr as *mut u8, self.layout) };
+        // Safety: ring_addr..ring_addr+mmap_len was mapped by mmap in `new`.
+        unsafe {
+            libc::munmap(self.ring_addr as *mut libc::c_void, self.mmap_len);
+        }
     }
 }
