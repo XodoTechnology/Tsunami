@@ -114,17 +114,22 @@ fn load_or_create_key(path: &str) -> [u8; 32] {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(p)
         {
-            use std::io::Write;
-            if f.write_all(&key).is_ok() {
-                log::info!("conn key persisted to {}", path);
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(&key) {
+                    log::warn!("conn key write to {} failed: {e}", path);
+                } else {
+                    log::info!("conn key persisted to {}", path);
+                }
             }
+            Err(e) => log::warn!("conn key create {} failed: {e}", path),
         }
     }
     #[cfg(not(unix))]
