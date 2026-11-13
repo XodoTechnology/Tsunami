@@ -77,6 +77,13 @@ pub struct ProtocolConfig {
     /// Protocol handling is unaffected; only the stats counter skips them.
     #[serde(default)]
     pub client_stats_ignore: Vec<String>,
+    /// Path to a 32-byte file holding the BEP-15 connection-id keyed-hash
+    /// secret. When set, conn_ids use wall-clock timestamps and survive
+    /// restarts (no reconnect storm on deploy). Empty = ephemeral key,
+    /// ids invalidated on every restart. Delete the file to force-rotate
+    /// (one reconnect wave, then stable again).
+    #[serde(default)]
+    pub conn_key_path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,6 +258,7 @@ impl Default for ProtocolConfig {
             client_stats: true,
             allow_client_ip: false,
             client_stats_ignore: Vec::new(),
+            conn_key_path: String::new(),
         }
     }
 }

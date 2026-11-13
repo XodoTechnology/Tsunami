@@ -381,7 +381,10 @@ pub fn run_packet_workers(
     // One validator key shared by all workers — FANOUT_HASH may land a
     // client's announce on a different worker than its connect, so conn_ids
     // must validate everywhere (same as the io_uring backend).
-    let validator = Validator::new(config.protocol.max_connection_age);
+    let validator = Validator::new(
+        config.protocol.max_connection_age,
+        &config.protocol.conn_key_path,
+    );
     let ip_limiter = IpConnectLimiter::new(
         config.ratelimit.connect_per_sec_per_ip,
         config.ratelimit.connect_burst_secs,

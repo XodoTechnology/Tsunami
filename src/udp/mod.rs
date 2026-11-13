@@ -767,7 +767,10 @@ pub fn run_workers(
     } else {
         config.network.socket_workers
     };
-    let validator = Validator::new(config.protocol.max_connection_age);
+    let validator = Validator::new(
+        config.protocol.max_connection_age,
+        &config.protocol.conn_key_path,
+    );
     let ip_limiter = crate::ratelimit::IpConnectLimiter::new(
         config.ratelimit.connect_per_sec_per_ip,
         config.ratelimit.connect_burst_secs,

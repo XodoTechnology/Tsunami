@@ -36,6 +36,7 @@ pub fn run_http(
     // ids issued on one thread validate on another (SO_REUSEPORT spreads conns).
     let validator = Arc::new(crate::udp::validator::Validator::new(
         config.protocol.max_connection_age,
+        &config.protocol.conn_key_path,
     ));
     let mut handles = Vec::new();
     for i in 0..threads {

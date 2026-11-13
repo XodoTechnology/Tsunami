@@ -37,6 +37,11 @@ max_response_peers = 50
 max_scrape_torrents = 100
 # Connection-id validity window (seconds)
 max_connection_age = 300
+# Path to a 32-byte file holding the connection-id keyed-hash secret.
+# Set it and conn_ids use wall-clock timestamps + a persistent key, so
+# they survive restarts (no reconnect storm on deploy). Empty = ephemeral
+# key, all ids invalidated on restart. Delete the file to force-rotate.
+# conn_key_path = "/etc/tsunami/conn.key"
 # Store peer_id per peer (~+40B/peer). Needed for HTTP compact=0 peer_id
 # echo and per-peer client detail. Disable at very large scale.
 store_peer_id = false

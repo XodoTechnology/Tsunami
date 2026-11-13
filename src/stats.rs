@@ -61,7 +61,7 @@ impl ProtoStats {
 }
 
 /// Striping for client stats to reduce lock contention.
-const CLIENT_STRIPES: usize = 64;
+const CLIENT_STRIPES: usize = 256;
 
 /// BEP 20 client signature = first 8 bytes of peer_id.
 pub type ClientKey = [u8; 8];
