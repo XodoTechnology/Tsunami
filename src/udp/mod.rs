@@ -777,9 +777,8 @@ pub fn run_workers(
     // Response buffers are fixed-size; peer/scrape writers index raw slices
     // and would panic on overflow. Fail fast at startup if config outgrows
     // the worst-case serialized response.
-    let need = 64
-        + config.protocol.max_response_peers * 18
-        + config.protocol.max_scrape_torrents * 12;
+    let need = (64 + config.protocol.max_response_peers * 18)
+        .max(32 + config.protocol.max_scrape_torrents * 12);
     assert!(
         need <= send_buffers::RESPONSE_BUF_LEN,
         "response buffers too small: need {need}B, have {}B — \
