@@ -9,7 +9,7 @@ use std::ptr::{addr_of_mut, null_mut};
 use io_uring::opcode::SendMsg;
 use io_uring::types::Fixed;
 
-pub const RESPONSE_BUF_LEN: usize = 4096;
+pub const RESPONSE_BUF_LEN: usize = 2048;
 
 const SOCKET_V4: Fixed = Fixed(0);
 const SOCKET_V6: Fixed = Fixed(1);

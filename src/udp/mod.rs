@@ -774,6 +774,18 @@ pub fn run_workers(
     } else {
         config.network.socket_workers
     };
+    // Response buffers are fixed-size; peer/scrape writers index raw slices
+    // and would panic on overflow. Fail fast at startup if config outgrows
+    // the worst-case serialized response.
+    let need = 64
+        + config.protocol.max_response_peers * 18
+        + config.protocol.max_scrape_torrents * 12;
+    assert!(
+        need <= send_buffers::RESPONSE_BUF_LEN,
+        "response buffers too small: need {need}B, have {}B — \
+         lower max_response_peers/max_scrape_torrents",
+        send_buffers::RESPONSE_BUF_LEN
+    );
     let validator = Validator::new(
         config.protocol.max_connection_age,
         &config.protocol.conn_key_path,
@@ -826,9 +838,11 @@ fn worker_main(
         .map(|n| n.next_power_of_two())
         .unwrap_or_else(|| (ring_entries.saturating_mul(16)).clamp(16384, 65536));
     // More provided RX buffers than SQ slots so the kernel can absorb bursts
-    // before ENOBUFS-shedding; each is REQUEST_BUF_LEN bytes.
+    // before ENOBUFS-shedding; each is REQUEST_BUF_LEN bytes. 2x is enough —
+    // a transient ENOBUFS now recovers via multishot rearm, so don't overpay
+    // ~16MB/worker of idle buffer memory for headroom we rarely need.
     let buf_ring_entries =
-        (ring_entries.saturating_mul(4)).clamp(2048, 16384).next_power_of_two() as u16;
+        (ring_entries.saturating_mul(2)).clamp(2048, 16384).next_power_of_two() as u16;
     // Bound the send pool independently — PENDING_SEND_MAX caps in-flight
     // sends anyway, so a huge ring_size shouldn't multiply send memory.
     let send_capacity = ring_entries.min(PENDING_SEND_MAX);
