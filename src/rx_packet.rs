@@ -649,7 +649,7 @@ pub fn process_packet(
             // traffic skips the connection-table lookup entirely.
             if protocol::synthetic_peer_id(&req.peer_id) {
                 local.blocked.fetch_add(1, Ordering::Relaxed);
-                protocol::write_error_response(out, req.transaction_id, "invalid peer_id")
+                return;
             } else if !validator.valid(ip, req.connection_id) {
                 return;
             } else {

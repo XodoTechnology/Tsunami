@@ -888,12 +888,44 @@ fn api_torrents(query: &str, store: &Arc<Store>) -> Response {
         .unwrap_or(100)
         .clamp(1, 1000) as usize;
     let offset = params.get_i64(b"offset").unwrap_or(0).max(0) as usize;
-    let mut all: Vec<(InfoHash, u32, u32)> = Vec::new();
-    store.for_each_torrent(|h, s, l| all.push((*h, s, l)));
-    // sort by total peers desc for a useful top-N
-    all.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
-    let total = all.len();
-    let page: Vec<serde_json::Value> = all
+    // Same counting semantics as iterating both family stores.
+    let total = store.totals().0 as usize;
+
+    // Bounded min-heap of the top offset+limit torrents by peer count.
+    // Avoids materializing and sorting every torrent per request; the heap
+    // is capped so absurd offsets can't force a giant allocation.
+    let want = offset.saturating_add(limit).min(200_000);
+    if offset >= want || total == 0 {
+        return (
+            200,
+            "application/json",
+            serde_json::json!({ "total": total, "torrents": [] })
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let mut heap: BinaryHeap<Reverse<(u64, InfoHash, u32, u32)>> =
+        BinaryHeap::with_capacity(want + 1);
+    store.for_each_torrent(|h, s, l| {
+        let peers = s as u64 + l as u64;
+        let item = Reverse((peers, *h, s, l));
+        if heap.len() < want {
+            heap.push(item);
+        } else if let Some(&Reverse((top_peers, _, _, _))) = heap.peek() {
+            if peers > top_peers {
+                heap.pop();
+                heap.push(item);
+            }
+        }
+    });
+    let mut top: Vec<(InfoHash, u32, u32)> = heap
+        .into_iter()
+        .map(|Reverse((_, h, s, l))| (h, s, l))
+        .collect();
+    top.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+    let page: Vec<serde_json::Value> = top
         .into_iter()
         .skip(offset)
         .take(limit)

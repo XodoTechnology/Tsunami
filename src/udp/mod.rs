@@ -391,10 +391,9 @@ impl Worker {
                 // Abuse filters run before conn_id validation: rejected
                 // traffic skips the connection-table lookup entirely.
                 if protocol::synthetic_peer_id(&req.peer_id) {
+                    // Abuse signature: count it, but don't spend a send on a
+                    // response — no spec client can produce an all-digit id.
                     self.local_mut(is_v4_sock).blocked += 1;
-                    self.emit_simple(addr, is_v4_sock, move |b| {
-                        protocol::write_error_response(b, req.transaction_id, "invalid peer_id")
-                    });
                     return;
                 }
                 if !self.validator.valid(ip, req.connection_id) {
@@ -715,7 +714,6 @@ impl Worker {
             let stats_v4 = &self.stats;
             self.local_v4.flush_into(&stats_v4.udp_ipv4, stats_v4);
             self.local_v6.flush_into(&stats_v4.udp_ipv6, stats_v4);
-            self.send_buffers.reset_likely_next();
             if self.cqe_overflow_pending > 0 {
                 stats_v4
                     .cqe_overflow

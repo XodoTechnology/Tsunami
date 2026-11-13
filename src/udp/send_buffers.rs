@@ -66,8 +66,9 @@ impl SendBuffer {
 
 pub struct SendBuffers {
     bufs: Vec<Box<SendBuffer>>,
-    free: Vec<bool>,
-    likely_next: usize,
+    in_use: Vec<bool>,
+    /// Stack of allocatable indices — O(1) alloc/free, no scanning.
+    free_list: Vec<u32>,
 }
 
 impl SendBuffers {
@@ -75,8 +76,8 @@ impl SendBuffers {
         let bufs = (0..capacity).map(|_| SendBuffer::new()).collect();
         Self {
             bufs,
-            free: vec![true; capacity],
-            likely_next: 0,
+            in_use: vec![false; capacity],
+            free_list: (0..capacity as u32).rev().collect(),
         }
     }
 
@@ -85,41 +86,28 @@ impl SendBuffers {
         self.bufs.len()
     }
 
-    /// Find a free buffer index.
+    /// Pop a free buffer index (LIFO — recently freed buffers stay cache-hot).
+    #[inline]
     pub fn alloc(&mut self) -> Option<usize> {
-        if self.likely_next >= self.bufs.len() {
-            return None;
-        }
-        for i in self.likely_next..self.bufs.len() {
-            if self.free[i] {
-                self.free[i] = false;
-                self.likely_next = i + 1;
-                return Some(i);
-            }
-        }
-        // wrap-around scan
-        for i in 0..self.likely_next {
-            if self.free[i] {
-                self.free[i] = false;
-                self.likely_next = i + 1;
+        while let Some(idx) = self.free_list.pop() {
+            let i = idx as usize;
+            if !self.in_use[i] {
+                self.in_use[i] = true;
                 return Some(i);
             }
         }
         None
     }
 
-    /// Mark buffer free after its sendmsg CQE completed.
+    /// Return a buffer to the pool after its sendmsg CQE completed.
+    /// Idempotent: a double-free is ignored via the in_use guard.
     /// # Safety
     /// Only call once the kernel is done with the buffer (CQE received).
     pub unsafe fn mark_free(&mut self, idx: usize) {
-        self.free[idx] = true;
-        if idx < self.likely_next {
-            self.likely_next = idx;
+        if self.in_use[idx] {
+            self.in_use[idx] = false;
+            self.free_list.push(idx as u32);
         }
-    }
-
-    pub fn reset_likely_next(&mut self) {
-        self.likely_next = 0;
     }
 
     /// Mutable access to the payload bytes for serialization.
