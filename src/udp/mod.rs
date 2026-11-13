@@ -679,6 +679,16 @@ impl Worker {
         loop {
             {
                 let mut sq = ring.submission();
+                // Control-plane SQEs (recv resubmits, ring-rebuild cancels)
+                // go first: a SQ full of pending sends must never starve
+                // them, or the recv multishot is silently lost forever.
+                let mut retry = Vec::new();
+                for e in rearm.drain(..) {
+                    if unsafe { sq.push(&e) }.is_err() {
+                        retry.push(e);
+                    }
+                }
+                rearm = retry;
                 let mut space = sq.capacity().saturating_sub(sq.len());
                 while space > 0 {
                     match self.pending_entries.pop_front() {
@@ -692,9 +702,6 @@ impl Worker {
                         }
                         None => break,
                     }
-                }
-                for e in rearm.drain(..) {
-                    let _ = unsafe { sq.push(&e) };
                 }
             }
 

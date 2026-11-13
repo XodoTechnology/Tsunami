@@ -180,6 +180,7 @@ fn worker(
     let mut sockets: Vec<UdpSocket> = Vec::with_capacity(per_thread);
     let mut peer_ids: Vec<[u8; 20]> = Vec::with_capacity(per_thread);
     let mut conn_ids: Vec<i64> = Vec::with_capacity(per_thread);
+    let mut local_ports: Vec<u16> = Vec::with_capacity(per_thread);
     let mut txid = (tid as i32) * 1_000_000;
 
     // bind sockets — with --srcips, round-robin across them so peers get
@@ -199,6 +200,7 @@ fn worker(
         let _ = sock.set_nonblocking(true);
         let _ = sock.connect(args.target);
         let local_port = sock.local_addr().unwrap().port();
+        local_ports.push(local_port);
         let mut pid = [0u8; 20];
         pid[..8].copy_from_slice(b"-TS0001-");
         pid[8..12].copy_from_slice(&(tid as u32 * 100_000 + i as u32).to_be_bytes());
@@ -303,7 +305,7 @@ fn worker(
         let is_seeder = rng.random::<f64>() < args.seeder_frac;
         let left = if is_seeder { 0 } else { 1_000_000 };
         let event = if idx < n { 2 } else { 0 }; // started for first pass
-        let local_port = sock.local_addr().map(|a| a.port()).unwrap_or(0);
+        let local_port = local_ports[idx % n];
         let mut h = args.info_hash;
         if args.torrents > 1 {
             let t = ((idx % n) % args.torrents) as u32;
@@ -331,12 +333,17 @@ fn worker(
         idx += 1;
         since_pace += 1;
 
-        // drain this socket's responses every 64 sends — a recv() syscall
-        // per announce was the send-rate bottleneck; buffers hold the backlog
-        if idx % 64 == 0 {
-            while let Ok(m) = sock.recv(&mut buf) {
-                let _ = m;
-                recv.fetch_add(1, Ordering::Relaxed);
+        // drain this socket's responses periodically — bounded so a large
+        // backlog can't stall the send loop; overflow counts as loss anyway
+        if idx % 256 == 0 {
+            for _ in 0..512 {
+                match sock.recv(&mut buf) {
+                    Ok(m) => {
+                        let _ = m;
+                        recv.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => break,
+                }
             }
         }
 
@@ -354,12 +361,18 @@ fn worker(
             }
         }
 
-        // opportunistic recv drain every 64 sends
-        if idx % 64 == 0 {
+        // rare all-socket sweep, heavily bounded — keeps backlog from
+        // overflowing rcvbufs without a recv() storm per send batch
+        if idx % 8192 == 0 {
             for s in sockets.iter() {
-                while let Ok(m) = s.recv(&mut buf) {
-                    recv.fetch_add(1, Ordering::Relaxed);
-                    let _ = m;
+                for _ in 0..32 {
+                    match s.recv(&mut buf) {
+                        Ok(m) => {
+                            recv.fetch_add(1, Ordering::Relaxed);
+                            let _ = m;
+                        }
+                        Err(_) => break,
+                    }
                 }
             }
         }
