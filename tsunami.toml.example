@@ -154,3 +154,15 @@ burst = 1.0
 [logging]
 # error|warn|info|debug|trace
 level = "info"
+
+[i2p]
+# I2P BitTorrent tracker endpoints (experimental — see docs/I2P.md).
+# Peers announce with their I2P Destination in the `ip` parameter instead
+# of an IP address. Enable only if you intend to serve I2P swarms.
+enable = false
+# Optional dedicated listener for I2P traffic only (e.g. the address the
+# SAM bridge / I2P HTTP proxy forwards to). When set, only /i2p/* and /a
+# are served there. Empty = I2P endpoints share [http].bind.
+# listen = "127.0.0.1:8081"
+# Max announces per destination per second (fixed window). 0 = unlimited.
+announce_rate = 5

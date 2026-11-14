@@ -256,11 +256,22 @@ impl Default for PasskeysConfig {
 #[serde(default)]
 pub struct I2pConfig {
     pub enable: bool,
+    /// Optional dedicated bind address for I2P traffic only (e.g. the
+    /// SAM bridge / I2P proxy endpoint). Empty = I2P endpoints share the
+    /// regular HTTP listener.
+    pub listen: String,
+    /// Max announces per destination per second (fixed window).
+    /// 0 = unlimited.
+    pub announce_rate: u32,
 }
 
 impl Default for I2pConfig {
     fn default() -> Self {
-        Self { enable: false }
+        Self {
+            enable: false,
+            listen: String::new(),
+            announce_rate: 5,
+        }
     }
 }
 

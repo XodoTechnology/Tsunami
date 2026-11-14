@@ -58,7 +58,80 @@ pub fn run_http(
                 .context("spawn http thread")?,
         );
     }
+
+    // Optional dedicated I2P listener (SAM bridge / I2P proxy endpoint) —
+    // serves only the /i2p/* and /a tracker endpoints.
+    if config.i2p.enable && !config.i2p.listen.is_empty() {
+        let config = config.clone();
+        let store = store.clone();
+        let stats = stats.clone();
+        let access_list = access_list.clone();
+        let i2p_store = i2p_store.clone();
+        let validator = validator.clone();
+        handles.push(
+            std::thread::Builder::new()
+                .name("http-i2p".into())
+                .spawn(move || {
+                    if let Err(e) = i2p_thread(
+                        config, store, stats, access_list, i2p_store, max_req, validator,
+                    ) {
+                        log::error!("i2p http thread died: {e:#}");
+                    }
+                })
+                .context("spawn i2p http thread")?,
+        );
+    }
     Ok(handles)
+}
+
+fn i2p_thread(
+    config: Config,
+    store: Arc<Store>,
+    stats: Arc<Stats>,
+    access_list: Arc<AccessList>,
+    i2p_store: Arc<crate::i2p::I2pStore>,
+    max_req: usize,
+    validator: Arc<crate::udp::validator::Validator>,
+) -> anyhow::Result<()> {
+    let bind: SocketAddr = config
+        .i2p
+        .listen
+        .parse()
+        .with_context(|| format!("invalid i2p.listen: {}", config.i2p.listen))?;
+    let listener = create_listener(bind)?;
+    log::info!("i2p http listening on {bind}");
+    let mut rng = Rng::new();
+    let mut scratch: Vec<PeerEndpoint> = Vec::with_capacity(256);
+    let validator = validator.for_worker();
+    loop {
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                stats.http_connections.fetch_add(1, Ordering::Relaxed);
+                let res = handle_conn(
+                    stream,
+                    peer,
+                    &config,
+                    &store,
+                    &stats,
+                    &access_list,
+                    &i2p_store,
+                    true,
+                    &mut rng,
+                    &mut scratch,
+                    max_req,
+                    &validator,
+                );
+                stats.http_connections.fetch_sub(1, Ordering::Relaxed);
+                if let Err(e) = res {
+                    log::debug!("i2p http conn error: {e}");
+                }
+            }
+            Err(e) => {
+                log::error!("i2p http accept: {e}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
 }
 
 fn create_listener(bind: SocketAddr) -> anyhow::Result<TcpListener> {
@@ -96,6 +169,7 @@ fn http_thread(
                     &stats,
                     &access_list,
                     &i2p_store,
+                    false,
                     &mut rng,
                     &mut scratch,
                     max_req,
@@ -130,6 +204,7 @@ fn handle_conn(
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
     i2p_store: &Arc<crate::i2p::I2pStore>,
+    i2p_only: bool,
     rng: &mut Rng,
     scratch: &mut Vec<PeerEndpoint>,
     max_req: usize,
@@ -173,6 +248,21 @@ fn handle_conn(
         Some(ip) => SocketAddr::new(ip, peer.port()),
         None => peer,
     };
+    // I2P destination enforcement: the I2PTunnel HTTP server adds
+    // X-I2P-DestB64/DestHash/DestB32 headers a client cannot spoof. When
+    // present they are authoritative over the announce `ip` parameter.
+    let i2p_enforce = i2p_dest_header(head);
+    let req = match parse_head(head) {
+        Some(r) => r,
+        None => return write_response(&mut stream, 400, "text/plain", b"bad request"),
+    };
+
+    // Dedicated I2P listener: only tracker I2P endpoints are reachable —
+    // checked before WebSocket/raw-BEP15 handling so nothing else leaks.
+    if i2p_only && !(req.path.starts_with("/i2p/") || req.path == "/a") {
+        return write_response(&mut stream, 404, "text/plain", b"not found");
+    }
+
     if crate::ws::is_websocket_upgrade(head) {
         return crate::ws::handle_upgrade(
             stream,
@@ -185,10 +275,6 @@ fn handle_conn(
             validator.for_worker(),
         );
     }
-    let req = match parse_head(head) {
-        Some(r) => r,
-        None => return write_response(&mut stream, 400, "text/plain", b"bad request"),
-    };
 
     // Raw BEP-15 over HTTP: POST /bep15 with the same binary payload a UDP
     // client would send; response is the same binary reply. Lets UDP-protocol
@@ -245,7 +331,7 @@ fn handle_conn(
     }
 
     let (status, ctype, body) = route(
-        &req, peer, config, store, stats, access_list, i2p_store, rng, scratch,
+        &req, peer, config, store, stats, access_list, i2p_store, i2p_enforce, rng, scratch,
     );
     let head_len = head.len() as u64;
     let tx_len = body.len() as u64 + 160;
@@ -264,6 +350,7 @@ fn route(
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
     i2p_store: &Arc<crate::i2p::I2pStore>,
+    i2p_enforce: Option<(bool, String)>,
     rng: &mut Rng,
     scratch: &mut Vec<PeerEndpoint>,
 ) -> Response {
@@ -284,10 +371,22 @@ fn route(
             rng,
             scratch,
         ),
-        "/i2p/announce" if config.i2p.enable => {
-            i2p_announce_http(req.query, config, i2p_store, stats, rng)
+        "/i2p/announce" | "/i2p/a" | "/a" if config.i2p.enable => {
+            i2p_announce_http(req.query, config, i2p_store, stats, rng, i2p_enforce)
         }
         "/i2p/scrape" if config.i2p.enable => i2p_scrape_http(req.query, i2p_store),
+        "/i2p/stats" if config.i2p.enable => {
+            let (torrents, peers) = i2p_store.totals();
+            (
+                200,
+                "application/json",
+                format!(
+                    "{{\"torrents\":{},\"peers\":{},\"version\":\"{}\"}}",
+                    torrents, peers, VERSION
+                )
+                .into_bytes(),
+            )
+        }
         "/scrape" => scrape_http(req.query, store, config.http.full_scrape),
         "/api/stats" => (
             200,
@@ -862,24 +961,95 @@ fn param_20(v: Option<&[u8]>) -> Option<[u8; 20]> {
     None
 }
 
+/// Extract the I2P destination-enforcement headers added by the
+/// I2PTunnel HTTP server (unspoofable by clients). Prefers the full
+/// base64 Destination (`X-I2P-DestB64`); falls back to `X-I2P-DestHash`
+/// (SHA-256 of the binary Destination) and `X-I2P-DestB32`.
+/// Returns `(is_hash_only, value)`.
+fn i2p_dest_header(head: &[u8]) -> Option<(bool, String)> {
+    let text = std::str::from_utf8(head).ok()?;
+    let mut b64 = None;
+    let mut hash = None;
+    let mut b32 = None;
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        if k.trim().eq_ignore_ascii_case("x-i2p-destb64") {
+            b64 = Some(v.to_string());
+        } else if k.trim().eq_ignore_ascii_case("x-i2p-desthash") {
+            hash = Some(v.to_string());
+        } else if k.trim().eq_ignore_ascii_case("x-i2p-destb32") {
+            b32 = Some(v.to_string());
+        }
+    }
+    if let Some(v) = b64 {
+        return Some((false, v));
+    }
+    if let Some(v) = hash {
+        return Some((true, v));
+    }
+    // X-I2P-DestB32 carries a base32 Destination — decode and re-encode
+    // as base64 so it yields full destination identity like DestB64.
+    b32.and_then(|v| crate::i2p::dest_b32_to_b64(&v))
+        .map(|v| (false, v))
+}
+
 fn i2p_announce_http(
     query: &str,
     config: &Config,
     i2p: &Arc<crate::i2p::I2pStore>,
     stats: &Arc<Stats>,
     rng: &mut Rng,
+    enforce: Option<(bool, String)>,
 ) -> Response {
     let params: QueryParams = parse_query(query).into();
     let Some(info_hash) = param_20(params.get(b"info_hash")) else {
         return (400, "text/plain", b"missing info_hash".to_vec());
     };
-    let Some(destination) = params
-        .get_str(b"destination")
-        .filter(|s| crate::i2p::valid_destination(s))
-    else {
-        return (400, "text/plain", b"missing destination".to_vec());
+    // Destination identity: unspoofable tunnel header wins; otherwise the
+    // spec `ip` parameter (base64 Destination, optional ".i2p"), with
+    // `destination` accepted as an alias.
+    let (destination, dest_hash) = match enforce {
+        Some((true, h)) => {
+            // Hash-only enforcement: key peers by the hash itself. The
+            // non-compact `ip` field can't carry a full destination, so
+            // hash-enforced peers are really meant for compact responses.
+            match crate::i2p::parse_dest_hash_b64(&h) {
+                Some(hash) => (format!("h#{}", h), hash),
+                None => return (400, "text/plain", b"bad dest hash header".to_vec()),
+            }
+        }
+        Some((false, b64)) => match crate::i2p::normalize_destination(&b64) {
+            Some(d) => {
+                let h = crate::i2p::dest_hash_of(&d);
+                (d, h)
+            }
+            None => return (400, "text/plain", b"bad destination header".to_vec()),
+        },
+        None => {
+            let raw = params
+                .get_str(b"ip")
+                .or_else(|| params.get_str(b"destination"))
+                .unwrap_or("");
+            match crate::i2p::normalize_destination(raw) {
+                Some(d) => {
+                    let h = crate::i2p::dest_hash_of(&d);
+                    (d, h)
+                }
+                None => return (400, "text/plain", b"missing destination".to_vec()),
+            }
+        }
     };
-    let peer_id = param_20(params.get(b"peer_id")).unwrap_or([0u8; 20]);
+    let Some(peer_id) = param_20(params.get(b"peer_id")) else {
+        return (400, "text/plain", b"missing peer_id".to_vec());
+    };
+    // Spec: port is a fake compatibility value (clients send 6881); echo it.
+    let port = params.get_u16(b"port").unwrap_or(6881);
     let left = params.get_i64(b"left").unwrap_or(-1);
     let event = match params.get_str(b"event").unwrap_or("") {
         "started" => SwarmEvent::Started,
@@ -889,6 +1059,7 @@ fn i2p_announce_http(
         _ => SwarmEvent::None,
     };
     let numwant = params.get_i64(b"numwant").unwrap_or(-1) as i32;
+    let compact = params.get_i64(b"compact").unwrap_or(0) != 0;
 
     if crate::protocol::synthetic_peer_id(&peer_id) {
         stats.http.blocked.fetch_add(1, Ordering::Relaxed);
@@ -917,44 +1088,72 @@ fn i2p_announce_http(
         stats.client_stats.record(&peer_id);
     }
 
-    let Some(mut res) =
-        i2p.announce(&info_hash, destination, peer_id, left, event, numwant, now, rng)
-    else {
-        return (400, "text/plain", b"invalid destination".to_vec());
+    let Some(res) = i2p.announce(
+        &info_hash,
+        &destination,
+        peer_id,
+        port,
+        left,
+        event,
+        numwant,
+        dest_hash,
+        now,
+        rng,
+    ) else {
+        stats.http.rate_limited.fetch_add(1, Ordering::Relaxed);
+        return (429, "text/plain", b"rate limited".to_vec());
     };
 
-    res.interval = config.protocol.peer_announce_interval;
+    let mut interval = config.protocol.peer_announce_interval;
     if config.protocol.announce_jitter_secs > 0 {
         let span = (config.protocol.announce_jitter_secs * 2 + 1) as usize;
         let delta = rng.below(span) as i32 - config.protocol.announce_jitter_secs as i32;
-        res.interval = (res.interval + delta).max(30);
+        interval = (interval + delta).max(30);
     }
 
     let mut enc = Encoder::new();
     enc.dict_begin();
-    enc.dict_int(b"interval", res.interval as i64);
-    enc.dict_int(b"min interval", res.interval as i64);
+    // Bencode dict keys in sorted order.
     enc.dict_int(b"complete", res.seeders as i64);
-    enc.dict_int(b"incomplete", res.leechers as i64);
     enc.dict_int(b"downloaders", res.downloaders as i64);
-    enc.dict_raw(
-        b"peers",
-        &{
-            let mut l = Encoder::new();
-            l.list_begin();
-            for (dest, pid) in &res.peers {
-                let mut d = Encoder::new();
-                d.dict_begin();
-                d.dict_bytes(b"destination", dest.as_bytes());
-                let pid_hex = crate::access::infohash_hex(pid);
-                d.dict_bytes(b"peer_id", pid_hex.as_bytes());
-                d.dict_end();
-                l.list_raw(&d.into_vec());
-            }
-            l.list_end();
-            l.into_vec()
-        },
-    );
+    enc.dict_int(b"incomplete", res.leechers as i64);
+    enc.dict_int(b"interval", interval as i64);
+    enc.dict_int(b"min interval", interval as i64);
+    if compact {
+        // Spec: peers = single byte string of concatenated 32-byte
+        // SHA-256 hashes of the binary Destinations.
+        let mut hashes = Vec::with_capacity(res.peers.len() * 32);
+        for p in &res.peers {
+            hashes.extend_from_slice(&p.dest_hash);
+        }
+        enc.dict_bytes(b"peers", &hashes);
+    } else {
+        // Spec: standard BEP-3 non-compact dicts with an I2P "ip".
+        enc.dict_raw(
+            b"peers",
+            &{
+                let mut l = Encoder::new();
+                l.list_begin();
+                for p in &res.peers {
+                    let mut d = Encoder::new();
+                    d.dict_begin();
+                    // Re-append ".i2p" for older-client compatibility.
+                    let ipstr = if p.destination.starts_with("h#") {
+                        p.destination[2..].to_string()
+                    } else {
+                        format!("{}.i2p", p.destination)
+                    };
+                    d.dict_bytes(b"ip", ipstr.as_bytes());
+                    d.dict_int(b"port", p.port as i64);
+                    d.dict_bytes(b"peer id", &p.peer_id);
+                    d.dict_end();
+                    l.list_raw(&d.into_vec());
+                }
+                l.list_end();
+                l.into_vec()
+            },
+        );
+    }
     enc.dict_end();
     (200, "text/plain", enc.into_vec())
 }

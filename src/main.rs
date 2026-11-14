@@ -53,6 +53,7 @@ fn main() -> anyhow::Result<()> {
     let i2p_store = Arc::new(tsunami::i2p::I2pStore::new(
         config.protocol.max_peer_age,
         config.protocol.max_response_peers,
+        config.i2p.announce_rate,
     ));
     let store = Arc::new(Store::new(
         shards,
