@@ -74,6 +74,33 @@ pub fn announce_event(
     ));
 }
 
+/// I2P announce-lifecycle event. Same shape as `announce_event` but the
+/// peer identity is an I2P Destination (`peer_dest`) rather than an IP.
+pub fn announce_event_i2p(
+    event: crate::swarm::AnnounceEvent,
+    info_hash: &[u8; 20],
+    destination: &str,
+    port: u16,
+    peer_id: &[u8; 20],
+    left: i64,
+    ts: u32,
+) {
+    use crate::swarm::AnnounceEvent as E;
+    let name = match event {
+        E::Started => "started",
+        E::Completed => "completed",
+        E::Stopped => "stopped",
+        E::Paused => "paused",
+        E::None => return,
+    };
+    emit(format!(
+        "{{\"event\":\"{name}\",\"info_hash\":\"{}\",\"peer_dest\":\"{}\",\"port\":{port},\"peer_id\":\"{}\",\"left\":{left},\"ts\":{ts}}}",
+        crate::access::infohash_hex(info_hash),
+        destination,
+        crate::access::infohash_hex(peer_id),
+    ));
+}
+
 pub fn dropped_total() -> u64 {
     DROPPED.load(Ordering::Relaxed)
 }

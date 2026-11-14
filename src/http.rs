@@ -371,9 +371,15 @@ fn route(
             rng,
             scratch,
         ),
-        "/i2p/announce" | "/i2p/a" | "/a" if config.i2p.enable => {
-            i2p_announce_http(req.query, config, i2p_store, stats, rng, i2p_enforce)
-        }
+        "/i2p/announce" | "/i2p/a" | "/a" if config.i2p.enable => i2p_announce_http(
+            req.query,
+            config,
+            i2p_store,
+            stats,
+            access_list,
+            rng,
+            i2p_enforce,
+        ),
         "/i2p/scrape" if config.i2p.enable => i2p_scrape_http(req.query, i2p_store),
         "/i2p/stats" if config.i2p.enable => {
             let (torrents, peers) = i2p_store.totals();
@@ -1004,6 +1010,7 @@ fn i2p_announce_http(
     config: &Config,
     i2p: &Arc<crate::i2p::I2pStore>,
     stats: &Arc<Stats>,
+    access_list: &Arc<AccessList>,
     rng: &mut Rng,
     enforce: Option<(bool, String)>,
 ) -> Response {
@@ -1011,6 +1018,9 @@ fn i2p_announce_http(
     let Some(info_hash) = param_20(params.get(b"info_hash")) else {
         return (400, "text/plain", b"missing info_hash".to_vec());
     };
+    if !access_list.allows(&info_hash) {
+        return (403, "text/plain", b"forbidden".to_vec());
+    }
     // Destination identity: unspoofable tunnel header wins; otherwise the
     // spec `ip` parameter (base64 Destination, optional ".i2p"), with
     // `destination` accepted as an alias.
@@ -1103,6 +1113,9 @@ fn i2p_announce_http(
         stats.http.rate_limited.fetch_add(1, Ordering::Relaxed);
         return (429, "text/plain", b"rate limited".to_vec());
     };
+    crate::hooks::announce_event_i2p(
+        event, &info_hash, &destination, port, &peer_id, left, now,
+    );
 
     let mut interval = config.protocol.peer_announce_interval;
     if config.protocol.announce_jitter_secs > 0 {

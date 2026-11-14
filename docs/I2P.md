@@ -66,6 +66,10 @@ Endpoints (all gated by `[i2p] enable = true`, off by default):
 - `GET /i2p/scrape` — repeated `info_hash` params (raw or hex); returns
   the BEP-48-style `files` dict including `downloaders`.
 - `GET /i2p/stats` — JSON `{torrents, peers}` totals for the I2P store.
+- Access-list enforcement: `[access_list]` allow/deny modes apply to I2P
+  announces identically to clearnet (403 when forbidden).
+- Event hooks: `protocol.event_hook_url` receives I2P lifecycle events
+  with a `peer_dest` field (the Destination) instead of `peer_ip`.
 - Destination enforcement headers (added by the I2P HTTP server / tunnel,
   unspoofable by clients): `X-I2P-DestB64` (full Destination, preferred),
   `X-I2P-DestHash` (SHA-256 of binary Destination → hash-only identity,
@@ -100,9 +104,13 @@ Behavior follows the I2P project's BitTorrent tracker documentation:
    and response encodings, but real I2P clients (i2p-bt, qBittorrent-I2P,
    libtorrent-I2P) should be tested end-to-end through a SAM bridge
    before this is considered stable.
-2. **Native I2P UDP** — I2P has a separate Datagram3-based UDP announce
+2. **Snapshot coverage** — the I2P store is not included in
+   `[snapshot]` save/restore; I2P peers are lost on restart and re-announce
+   within one interval. Acceptable at current scope; add serialization
+   if I2P deployments need restart persistence.
+3. **Native I2P UDP** — I2P has a separate Datagram3-based UDP announce
    protocol; not implemented (HTTP-over-SAM covers the common case).
-3. **The Phase-1 `PeerAddr` refactor** — only if I2P volume ever
+4. **The Phase-1 `PeerAddr` refactor** — only if I2P volume ever
    justifies unifying the stores; not needed at current scope.
 
 ## Original analysis (superseded by the standalone-module approach above)
