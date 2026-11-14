@@ -2,6 +2,7 @@ pub mod access;
 pub mod bencode;
 pub mod config;
 pub mod http;
+pub mod hooks;
 pub mod peerid;
 pub mod protocol;
 pub mod ratelimit;

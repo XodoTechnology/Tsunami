@@ -78,8 +78,30 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
   never gated. Off by default.
 - **Scrape export**: periodic `infohash seeders leechers` file (for mirrors).
 - **Access list**: allow/deny info hashes, reload on SIGHUP.
+- **Passkeys** (`[passkeys]` table + `GET /announce/<passkey>`) —
+  private-tracker style access: each key is bound to a list of info hashes
+  (empty = all torrents) and satisfies the access list for them.
+- **Event hooks** (`protocol.event_hook_url`) — POSTs batched JSON of
+  announce lifecycle events (started/completed/stopped/paused) to an HTTP
+  endpoint, for private-tracker integrations.
+- **BEP-21 paused event** — `event=paused` keeps the peer tracked as
+  incomplete but excludes it from downloader counts; scrape responses
+  include a `downloaders` field.
+- **Announce interval jitter** (`protocol.announce_jitter_secs`) —
+  randomizes the announced interval per response to de-phase announce
+  waves after swarm events.
 - **Anti-amplification**: stateless HMAC connection IDs (BEP 15 style).
 - mimalloc allocator, lock-light sharded design.
+
+## Protocol support
+
+- BEP-3 HTTP announce (compact + non-compact peer lists)
+- BEP-15 UDP tracker protocol: connect / announce / scrape, IPv4 + IPv6 (BEP-27)
+- BEP-21 `event=paused` partial-seed tracking + `downloaders` scrape stat
+- BEP-23 compact peer format
+- BEP-48 HTTP scrape, including full scrape
+- BEP-20 peer_id client identification in stats
+- WebSocket tracker (BEP-15 binary messages in WS frames) for WebTorrent
 
 ## Build
 

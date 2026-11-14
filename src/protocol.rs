@@ -29,6 +29,8 @@ pub enum AnnounceEvent {
     Completed = 1,
     Started = 2,
     Stopped = 3,
+    /// BEP-21 partial-seed pause (wire value 4).
+    Paused = 4,
 }
 
 impl AnnounceEvent {
@@ -38,6 +40,7 @@ impl AnnounceEvent {
             1 => Self::Completed,
             2 => Self::Started,
             3 => Self::Stopped,
+            4 => Self::Paused,
             _ => Self::None,
         }
     }

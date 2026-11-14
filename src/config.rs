@@ -1,6 +1,7 @@
 //! TOML configuration for Tsunami.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -13,6 +14,7 @@ pub struct Config {
     pub cleaning: CleaningConfig,
     pub statistics: StatisticsConfig,
     pub access_list: AccessListConfig,
+    pub passkeys: PasskeysConfig,
     pub scrape_export: ScrapeExportConfig,
     pub snapshot: SnapshotConfig,
     pub ratelimit: RateLimitConfig,
@@ -81,6 +83,14 @@ pub struct ProtocolConfig {
     /// Protocol handling is unaffected; only the stats counter skips them.
     #[serde(default)]
     pub client_stats_ignore: Vec<String>,
+    /// POST a JSON batch of announce lifecycle events (started/completed/
+    /// stopped/paused) to this URL, for private-tracker integrations.
+    /// Plain http:// only; empty = disabled.
+    #[serde(default)]
+    pub event_hook_url: String,
+    /// Max queued hook events before new ones are dropped.
+    #[serde(default = "default_event_hook_queue")]
+    pub event_hook_queue: usize,
     /// Path to a 32-byte file holding the BEP-15 connection-id keyed-hash
     /// secret. When set, conn_ids use wall-clock timestamps and survive
     /// restarts (no reconnect storm on deploy). Empty = ephemeral key,
@@ -213,6 +223,30 @@ pub struct RateLimitConfig {
     pub connect_burst_secs: f64,
 }
 
+/// Private-tracker style passkeys for `GET /announce/<passkey>`.
+///
+/// TOML shape:
+/// ```toml
+/// [passkeys]
+/// "user-secret" = ["<40-char-hex-info_hash>", ...]  # empty list = all torrents
+/// ```
+/// A valid passkey bypasses the info-hash access list for the torrents it is
+/// bound to. Announce requests without a passkey are unaffected.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PasskeysConfig {
+    #[serde(flatten)]
+    pub keys: HashMap<String, Vec<String>>,
+}
+
+impl Default for PasskeysConfig {
+    fn default() -> Self {
+        Self {
+            keys: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -229,6 +263,7 @@ impl Default for Config {
             cleaning: CleaningConfig::default(),
             statistics: StatisticsConfig::default(),
             access_list: AccessListConfig::default(),
+            passkeys: PasskeysConfig::default(),
             scrape_export: ScrapeExportConfig::default(),
             snapshot: SnapshotConfig::default(),
             ratelimit: RateLimitConfig::default(),
@@ -254,11 +289,17 @@ impl Default for NetworkConfig {
     }
 }
 
+fn default_event_hook_queue() -> usize {
+    4096
+}
+
 impl Default for ProtocolConfig {
     fn default() -> Self {
         Self {
             peer_announce_interval: 900,
             announce_jitter_secs: 0,
+            event_hook_url: String::new(),
+            event_hook_queue: 4096,
             max_peer_age: 1800,
             max_response_peers: 50,
             max_scrape_torrents: 70,

@@ -466,7 +466,7 @@ impl Worker {
                     AnnounceEvent::Started => self.local_mut(is_v4_sock).ev_started += 1,
                     AnnounceEvent::Completed => self.local_mut(is_v4_sock).ev_completed += 1,
                     AnnounceEvent::Stopped => self.local_mut(is_v4_sock).ev_stopped += 1,
-                    AnnounceEvent::None => {}
+                    AnnounceEvent::Paused | AnnounceEvent::None => {}
                 }
                 let txid = req.transaction_id;
                 let (ip, port, peer_id, left, numwant) =
@@ -499,6 +499,9 @@ impl Worker {
                         if removed {
                             self.local_mut(is_v4_sock).peers_removed += 1;
                         }
+                        crate::hooks::announce_event(
+                            event, &info_hash, announce_ip, port, &peer_id, left, now,
+                        );
                         let peers = &self.peer_scratch;
                         let ok = Self::emit_response(
                             &mut self.send_buffers,
@@ -547,7 +550,7 @@ impl Worker {
                 let stats = self.store.scrape(&hashes[..count]);
                 self.scrape_scratch.clear();
                 self.scrape_scratch
-                    .extend(stats.iter().map(|&(s, _c, l)| (s as i32, 0, l as i32)));
+                    .extend(stats.iter().map(|&(s, _c, l, _d)| (s as i32, 0, l as i32)));
                 let scratch = &self.scrape_scratch;
                 let ok = Self::emit_response(
                     &mut self.send_buffers,

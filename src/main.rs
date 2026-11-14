@@ -40,6 +40,11 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("tsunami v{VERSION} starting");
 
+    tsunami::hooks::init(
+        &config.protocol.event_hook_url,
+        config.protocol.event_hook_queue,
+    );
+
     let stats = Stats::new();
     stats
         .client_stats

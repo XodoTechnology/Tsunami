@@ -152,6 +152,7 @@
 <header>
   <h1><svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="thg" x1="6" y1="24" x2="52" y2="56" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4f8cff"/><stop offset="1" stop-color="#a06bff"/></linearGradient></defs><path d="M6 56V40c4 0 6-10 14-13 8-3 14 1 20 5 4 2.5 7 3 12 3V56H6Z" fill="url(#thg)"/><path d="M6 56V49c5-1 8-6 14-8 6-2 10 0 16 3 4 2 8 2 12 2V56H6Z" fill="#0b0e14" opacity=".28"/></svg>Tsunami Tracker</h1>
   <span class="sub" id="ver"></span>
+  <span class="sub" id="endpoints" title="Tracker announce endpoints"></span>
   <span class="live">
     <span class="pulse"></span><span id="upd">connecting…</span>
     <button id="customizeBtn">Customize</button>
@@ -514,6 +515,8 @@ async function tick() {
     lastStats = st; lastMetrics = mt;
     const sw = st.swarm || {}, r = st.rates || {}, sys = st.system || {};
     $('ver').textContent = 'v' + (st.version||'?') + ' · up ' + up(st.uptime_seconds);
+    $('endpoints').textContent =
+      'announce: ' + location.origin + '/announce · scrape: ' + location.origin + '/scrape';
     $('upd').textContent = 'updated ' + new Date().toLocaleTimeString();
 
     // ---- cards (all generated; visibility applied by data-w) ----

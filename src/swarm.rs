@@ -99,6 +99,8 @@ pub trait Slot: Clone + Send + Sync + 'static {
     fn key(&self) -> Self::Key;
     fn is_seeder(&self) -> bool;
     fn set_seeder(&mut self, seeder: bool);
+    fn is_paused(&self) -> bool;
+    fn set_paused(&mut self, paused: bool);
     fn valid_until(&self) -> u32;
     fn set_valid_until(&mut self, t: u32);
     fn refresh_valid_until(&self, t: u32);
@@ -106,6 +108,7 @@ pub trait Slot: Clone + Send + Sync + 'static {
 }
 
 const SEEDER_FLAG: u8 = 1;
+const PAUSED_FLAG: u8 = 2;
 
 #[inline]
 fn mix64(mut x: u64) -> u64 {
@@ -182,6 +185,18 @@ impl Slot for Slot4 {
             self.flags |= SEEDER_FLAG;
         } else {
             self.flags &= !SEEDER_FLAG;
+        }
+    }
+    #[inline]
+    fn is_paused(&self) -> bool {
+        self.flags & PAUSED_FLAG != 0
+    }
+    #[inline]
+    fn set_paused(&mut self, paused: bool) {
+        if paused {
+            self.flags |= PAUSED_FLAG;
+        } else {
+            self.flags &= !PAUSED_FLAG;
         }
     }
     #[inline]
@@ -295,6 +310,18 @@ impl Slot for Slot6 {
         }
     }
     #[inline]
+    fn is_paused(&self) -> bool {
+        self.flags & PAUSED_FLAG != 0
+    }
+    #[inline]
+    fn set_paused(&mut self, paused: bool) {
+        if paused {
+            self.flags |= PAUSED_FLAG;
+        } else {
+            self.flags &= !PAUSED_FLAG;
+        }
+    }
+    #[inline]
     fn valid_until(&self) -> u32 {
         self.valid_until.load(Ordering::Relaxed)
     }
@@ -327,6 +354,9 @@ pub enum AnnounceEvent {
     Completed,
     Started,
     Stopped,
+    /// BEP-21: peer stays in the swarm and keeps its expiry refreshed, but is
+    /// counted as incomplete while excluded from downloader statistics.
+    Paused,
 }
 
 impl AnnounceEvent {
@@ -336,6 +366,7 @@ impl AnnounceEvent {
             1 => Self::Completed,
             2 => Self::Started,
             3 => Self::Stopped,
+            4 => Self::Paused,
             _ => Self::None,
         }
     }
@@ -543,6 +574,17 @@ impl<S: Slot> Swarm<S> {
         (self.seeders, self.peers.len() as u32 - self.seeders)
     }
 
+    /// BEP-21 downloader count: leechers that are not paused. O(n) over the
+    /// swarm's peers — only called from scrape paths, which are rare and
+    /// bounded by max_scrape_torrents.
+    pub fn downloaders(&self) -> u32 {
+        self.peers
+            .as_slice()
+            .iter()
+            .filter(|p| !p.is_seeder() && !p.is_paused())
+            .count() as u32
+    }
+
     #[inline]
     pub fn needs_clean(&self, now: u32) -> bool {
         self.peers.is_empty() || self.min_valid_until <= now
@@ -605,14 +647,17 @@ impl<S: Slot> Swarm<S> {
         rng: &mut Rng,
         out: &mut Vec<PeerEndpoint>,
     ) -> Option<(u32, u32, bool, bool)> {
-        if input.event == AnnounceEvent::Stopped || self.peer_ids.is_some() {
+        if input.event == AnnounceEvent::Stopped
+            || input.event == AnnounceEvent::Paused
+            || self.peer_ids.is_some()
+        {
             return None;
         }
         let slot = self.find_slot(key)? as usize;
         let is_seeder = input.left == 0;
         let peers = self.peers.as_slice();
         let s = &peers[slot];
-        if s.is_seeder() != is_seeder {
+        if s.is_seeder() != is_seeder || s.is_paused() {
             return None;
         }
         s.refresh_valid_until(now.wrapping_add(max_peer_age));
@@ -637,6 +682,7 @@ impl<S: Slot> Swarm<S> {
     ) -> (Option<usize>, bool, bool) {
         let is_stopped = input.event == AnnounceEvent::Stopped;
         let is_seeder = !is_stopped && input.left == 0;
+        let paused = input.event == AnnounceEvent::Paused && !is_seeder;
         let existing = self.find_slot(&key);
         let mut added = false;
         let mut removed = false;
@@ -656,6 +702,7 @@ impl<S: Slot> Swarm<S> {
                     let s = &mut peers[slot as usize];
                     let was_seeder = s.is_seeder();
                     s.set_seeder(is_seeder);
+                    s.set_paused(paused);
                     s.set_valid_until(exp);
                     if len == 1 {
                         self.min_valid_until = exp;
@@ -673,7 +720,9 @@ impl<S: Slot> Swarm<S> {
                     }
                 }
                 None => {
-                    let slot = self.insert_slot(S::new_slot(&input.ip, input.port, is_seeder, exp));
+                    let mut slot = S::new_slot(&input.ip, input.port, is_seeder, exp);
+                    slot.set_paused(paused);
+                    let slot = self.insert_slot(slot);
                     if is_seeder {
                         self.seeders += 1;
                     }
@@ -1093,17 +1142,19 @@ impl<S: Slot> FamilyStore<S> {
         res
     }
 
-    /// Scrape stats for a list of info hashes. Returns (seeders, leechers) each.
-    pub fn scrape(&self, info_hashes: &[[u8; 20]]) -> Vec<(u32, u32)> {
+    /// Scrape stats for a list of info hashes. Returns (seeders, leechers,
+    /// downloaders) each.
+    pub fn scrape(&self, info_hashes: &[[u8; 20]]) -> Vec<(u32, u32, u32)> {
         let mut out = Vec::with_capacity(info_hashes.len());
         for hash in info_hashes {
             let shard = &self.shards[self.shard_index(hash)];
             let r = shard.read();
             if let Some(lock) = r.get(hash) {
                 let swarm = lock.read();
-                out.push(swarm.num_peers());
+                let (s, l) = swarm.num_peers();
+                out.push((s, l, swarm.downloaders()));
             } else {
-                out.push((0, 0));
+                out.push((0, 0, 0));
             }
         }
         out
@@ -1223,6 +1274,19 @@ impl<S: Slot> FamilyStore<S> {
                 let swarm = lock.read();
                 let (s, l) = swarm.num_peers();
                 f(hash, s, l);
+            }
+        }
+    }
+
+    /// Like `for_each_torrent` but also reports BEP-21 downloader counts;
+    /// walks every peer, so reserve for rare full-scrape use.
+    fn for_each_torrent_full(&self, out: &mut Vec<(InfoHash, u32, u32, u32)>) {
+        for shard in &self.shards {
+            let r = shard.read();
+            for (hash, lock) in r.iter() {
+                let swarm = lock.read();
+                let (s, l) = swarm.num_peers();
+                out.push((*hash, s, l, swarm.downloaders()));
             }
         }
     }
@@ -1451,13 +1515,14 @@ impl Store {
         })
     }
 
-    /// Scrape summed across both families.
-    pub fn scrape(&self, info_hashes: &[[u8; 20]]) -> Vec<(u32, u32, u32)> {
+    /// Scrape summed across both families. Returns (seeders, downloaded,
+    /// leechers, downloaders) per hash — `downloaded` is always 0 (untracked).
+    pub fn scrape(&self, info_hashes: &[[u8; 20]]) -> Vec<(u32, u32, u32, u32)> {
         let a = self.v4.scrape(info_hashes);
         let b = self.v6.scrape(info_hashes);
         a.into_iter()
             .zip(b)
-            .map(|((s4, l4), (s6, l6))| (s4 + s6, 0, l4 + l6))
+            .map(|((s4, l4, d4), (s6, l6, d6))| (s4 + s6, 0, l4 + l6, d4 + d6))
             .collect()
     }
 
@@ -1645,11 +1710,12 @@ impl Store {
     }
 
     /// All torrents' (info_hash, seeders, leechers) across both families —
-    /// used by the HTTP full-scrape endpoint.
-    pub fn all_scrape(&self) -> Vec<(InfoHash, u32, u32)> {
+    /// used by the HTTP full-scrape endpoint. Includes BEP-21 downloader
+    /// counts, so it walks every peer — only for the rare full scrape.
+    pub fn all_scrape(&self) -> Vec<(InfoHash, u32, u32, u32)> {
         let mut out = Vec::new();
-        self.v4.for_each_torrent(|h, s, l| out.push((*h, s, l)));
-        self.v6.for_each_torrent(|h, s, l| out.push((*h, s, l)));
+        self.v4.for_each_torrent_full(&mut out);
+        self.v6.for_each_torrent_full(&mut out);
         out
     }
 }

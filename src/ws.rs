@@ -322,7 +322,7 @@ pub(crate) fn dispatch(
                 swarm::AnnounceEvent::Stopped => {
                     stats.http.ev_stopped.fetch_add(1, Ordering::Relaxed);
                 }
-                swarm::AnnounceEvent::None => {}
+                swarm::AnnounceEvent::Paused | swarm::AnnounceEvent::None => {}
             }
             let now = unix_now();
             // Optional client-supplied IP becomes the swarm address only when
@@ -351,6 +351,9 @@ pub(crate) fn dispatch(
                     if removed {
                         stats.peers_removed.fetch_add(1, Ordering::Relaxed);
                     }
+                    crate::hooks::announce_event(
+                        event, &info_hash, announce_ip, port, &req.peer_id, req.left, now,
+                    );
                     let mut b = vec![0u8; 64 + scratch.len() * 18];
                     let mut o = protocol::write_announce_header(
                         &mut b, req.transaction_id, interval, leechers as i32, seeders as i32,
@@ -382,7 +385,7 @@ pub(crate) fn dispatch(
             let count = hashes.len().min(config.protocol.max_scrape_torrents);
             let stats_v = store.scrape(&hashes[..count]);
             let mut triples: Vec<(i32, i32, i32)> = Vec::with_capacity(count);
-            for &(s, _c, l) in stats_v.iter() {
+            for &(s, _c, l, _d) in stats_v.iter() {
                 triples.push((s as i32, 0, l as i32));
             }
             let mut b = vec![0u8; 8 + triples.len() * 12];

@@ -680,7 +680,7 @@ pub fn process_packet(
                     swarm::AnnounceEvent::Stopped => {
                         local.ev_stopped.fetch_add(1, Ordering::Relaxed);
                     }
-                    swarm::AnnounceEvent::None => {}
+                    swarm::AnnounceEvent::Paused | swarm::AnnounceEvent::None => {}
                 }
                 if config.protocol.client_stats {
                     stats.client_stats.record(&req.peer_id);
@@ -736,7 +736,7 @@ pub fn process_packet(
             let count = hashes.len().min(config.protocol.max_scrape_torrents);
             let s = store.scrape(&hashes[..count]);
             scrape_scratch.clear();
-            scrape_scratch.extend(s.iter().map(|&(a, _c, l)| (a as i32, 0, l as i32)));
+            scrape_scratch.extend(s.iter().map(|&(a, _c, l, _d)| (a as i32, 0, l as i32)));
             protocol::write_scrape_response(out, transaction_id, scrape_scratch)
         }
         ParseResult::Err(ParseFailure::Sendable { connection_id, transaction_id, message }) => {

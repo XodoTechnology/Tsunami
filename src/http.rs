@@ -266,13 +266,15 @@ fn route(
     }
     let head_only = req.method == "HEAD";
     let resp = match req.path {
-        "/announce" => announce_http(
+        p if p == "/announce" || p.starts_with("/announce/") => announce_http(
             req.query,
             peer.ip(),
             config.protocol.allow_client_ip,
             store,
             stats,
             access_list,
+            &config.passkeys.keys,
+            p.strip_prefix("/announce/").filter(|s| !s.is_empty()),
             rng,
             scratch,
         ),
@@ -686,6 +688,8 @@ fn announce_http(
     store: &Arc<Store>,
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
+    passkeys: &std::collections::HashMap<String, Vec<String>>,
+    passkey: Option<&str>,
     rng: &mut Rng,
     scratch: &mut Vec<PeerEndpoint>,
 ) -> Response {
@@ -703,6 +707,7 @@ fn announce_http(
         "started" => SwarmEvent::Started,
         "completed" => SwarmEvent::Completed,
         "stopped" => SwarmEvent::Stopped,
+        "paused" => SwarmEvent::Paused,
         _ => SwarmEvent::None,
     };
     let numwant = params.get_i64(b"numwant").unwrap_or(-1) as i32;
@@ -719,7 +724,27 @@ fn announce_http(
         src_ip
     };
 
-    if !access_list.allows(&info_hash) {
+    // Optional private-tracker passkey from `/announce/<passkey>`: the key
+    // must exist, and when it carries a hash allowlist it must cover this
+    // info_hash. A valid passkey satisfies the access list for that torrent.
+    let mut passkey_ok = false;
+    if let Some(pk) = passkey {
+        match passkeys.get(pk) {
+            Some(allowed) => {
+                if allowed.is_empty() {
+                    passkey_ok = true;
+                } else {
+                    let ih = crate::access::infohash_hex(&info_hash);
+                    passkey_ok = allowed.iter().any(|h| h.eq_ignore_ascii_case(&ih));
+                }
+                if !passkey_ok {
+                    return (403, "text/plain", b"info hash not allowed for passkey".to_vec());
+                }
+            }
+            None => return (403, "text/plain", b"invalid passkey".to_vec()),
+        }
+    }
+    if !passkey_ok && !access_list.allows(&info_hash) {
         return (403, "text/plain", b"info hash not allowed".to_vec());
     }
     if crate::protocol::synthetic_peer_id(&peer_id) {
@@ -743,7 +768,7 @@ fn announce_http(
         SwarmEvent::Stopped => {
             stats.http.ev_stopped.fetch_add(1, Ordering::Relaxed);
         }
-        SwarmEvent::None => {}
+        SwarmEvent::Paused | SwarmEvent::None => {}
     }
     if store.store_peer_id {
         stats.client_stats.record(&peer_id);
@@ -768,6 +793,9 @@ fn announce_http(
             if removed {
                 stats.peers_removed.fetch_add(1, Ordering::Relaxed);
             }
+            crate::hooks::announce_event(
+                event, &info_hash, announce_ip, port, &peer_id, left, now,
+            );
             // Bep 3 keys emitted in sorted order: complete, incomplete,
             // interval, min interval, peers[, peers6].
             let mut enc = Encoder::new();
@@ -843,20 +871,20 @@ fn scrape_http(query: &str, store: &Arc<Store>, full_scrape: bool) -> Response {
             }
         }
     }
-    // (info_hash, complete/seeders, incomplete/leechers) rows to encode
-    let mut rows: Vec<(InfoHash, i64, i64)> = Vec::new();
+    // (info_hash, complete/seeders, incomplete/leechers, downloaders) rows
+    let mut rows: Vec<(InfoHash, i64, i64, i64)> = Vec::new();
     if hashes.is_empty() {
         if !full_scrape {
             return (400, "text/plain", b"missing info_hash".to_vec());
         }
         // BEP-12 "full scrape": every tracked torrent.
-        for (h, s, l) in store.all_scrape() {
-            rows.push((h, s as i64, l as i64));
+        for (h, s, l, d) in store.all_scrape() {
+            rows.push((h, s as i64, l as i64, d as i64));
         }
     } else {
         let stats = store.scrape(&hashes);
-        for (h, &(s, _c, l)) in hashes.iter().zip(stats.iter()) {
-            rows.push((*h, s as i64, l as i64));
+        for (h, &(s, _c, l, d)) in hashes.iter().zip(stats.iter()) {
+            rows.push((*h, s as i64, l as i64, d as i64));
         }
     }
     let mut enc = Encoder::new();
@@ -864,14 +892,15 @@ fn scrape_http(query: &str, store: &Arc<Store>, full_scrape: bool) -> Response {
     enc.dict_raw(b"files", &{
         let mut f = Encoder::new();
         f.dict_begin();
-        for (h, s, l) in &rows {
-            let mut d = Encoder::new();
-            d.dict_begin();
-            d.dict_int(b"complete", *s);
-            d.dict_int(b"downloaded", 0);
-            d.dict_int(b"incomplete", *l);
-            d.dict_end();
-            f.dict_raw(h, &d.into_vec());
+        for (h, s, l, d) in &rows {
+            let mut d_enc = Encoder::new();
+            d_enc.dict_begin();
+            d_enc.dict_int(b"complete", *s);
+            d_enc.dict_int(b"downloaded", 0);
+            d_enc.dict_int(b"downloaders", *d);
+            d_enc.dict_int(b"incomplete", *l);
+            d_enc.dict_end();
+            f.dict_raw(h, &d_enc.into_vec());
         }
         f.dict_end();
         f.into_vec()
