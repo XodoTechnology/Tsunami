@@ -523,11 +523,6 @@ fn i2p_b64_encode(bin: &[u8]) -> String {
     out
 }
 
-/// Loose pre-check used before normalize (cheap reject of obvious junk).
-pub fn looks_like_destination(s: &str) -> bool {
-    s.len() >= 64 && s.len() <= 1024 && s.is_ascii()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
