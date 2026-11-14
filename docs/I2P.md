@@ -107,12 +107,37 @@ Behavior follows the I2P project's BitTorrent tracker documentation:
 - Non-compact `ip` values get `.i2p` appended for older-client
   compatibility.
 
+## Validation status
+
+Verified locally (unit tests + live HTTP smoke): compact/non-compact
+response encodings, self-exclusion, scrape counts, all parameter
+validation, header enforcement precedence, B32 decode, dedicated-listener
+isolation (incl. WebSocket rejection), access-list 403, per-destination
+429, XFF rejection, `enforce_destination` mode, and snapshot
+round-trip.
+
+Verified over the **real I2P network** (i2pd router, ~388 peers, live
+tunnels — see `scripts/i2p/`): an HTTP request through the router's HTTP
+proxy reached the I2P server tunnel and was served by Tsunami on the
+dedicated I2P listener (`/i2p/stats` → 200). Real announces over the same
+path returned correct bencode: compact 32-byte peer hashes, non-compact
+peer dicts carrying full base64 Destinations with `.i2p`, scrape
+`complete/incomplete/downloaders/downloaded` agreeing with announce
+counts, and `paused`/`stopped` events honoring BEP-21 semantics (paused
+peers stay in the swarm but leave `downloaders`).
+
+Not yet verified end-to-end: `X-I2P-Dest*` enforcement headers over real
+I2P (requires an I2P HTTP server that injects them — i2pd's tunnel and
+HTTP proxy do not), and real client software (qBittorrent-I2P,
+libtorrent-I2P) interoperability.
+
 ## Remaining work
 
 1. **Client-format validation** — the spec documents tracker *requests*
-   and response encodings, but real I2P clients (i2p-bt, qBittorrent-I2P,
-   libtorrent-I2P) should be tested end-to-end through a SAM bridge
-   before this is considered stable.
+   and response encodings. The wire format is now proven over real I2P
+   (above), but pointing an actual I2P BitTorrent client
+   (i2p-bt/qBittorrent-I2P/libtorrent-I2P) at a running instance is still
+   the final compatibility check.
 2. ~~Snapshot coverage~~ — done: I2P peers persist to
    `<snapshot.path stem>.i2p.snap` on the same schedule as clearnet
    snapshots (expired peers are skipped on load).
