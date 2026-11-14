@@ -29,6 +29,10 @@ swarm_shards = 256
 [protocol]
 # Announce interval reported to peers (seconds)
 peer_announce_interval = 1800
+# Randomize the announced interval by ±this many seconds per response
+# (0 = disabled). De-phases announce waves after swarm events. Recommended
+# ~10-20% of the interval, e.g. 180-360 for a 1800s interval.
+announce_jitter_secs = 0
 # Peers not announcing within this window are expired (seconds)
 max_peer_age = 2700
 # Max peers returned per announce
@@ -92,6 +96,10 @@ dashboard = true
 # addresses. Tracker protocol responses always carry full IPs — peers need
 # them to connect. Default true; set false to expose full IPs.
 mask_peer_ips = true
+# Max complete WebSocket announce messages per connection per second
+# (0 = unlimited). Legit clients send ~1 announce per interval; this only
+# trips on abusive floods.
+websocket_msgs_per_sec = 50
 
 [cleaning]
 # Seconds between peer-expiry passes

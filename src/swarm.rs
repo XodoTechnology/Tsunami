@@ -1371,6 +1371,7 @@ pub struct Store {
     pub v4: FamilyStore<Slot4>,
     pub v6: FamilyStore<Slot6>,
     pub peer_announce_interval: i32,
+    pub announce_jitter_secs: u32,
     pub max_peer_age: u32,
     pub max_response_peers: usize,
     pub store_peer_id: bool,
@@ -1381,6 +1382,7 @@ impl Store {
         num_shards: usize,
         store_peer_id: bool,
         peer_announce_interval: i32,
+        announce_jitter_secs: u32,
         max_peer_age: u32,
         max_response_peers: usize,
     ) -> Self {
@@ -1388,6 +1390,7 @@ impl Store {
             v4: FamilyStore::new(num_shards, store_peer_id),
             v6: FamilyStore::new(num_shards, store_peer_id),
             peer_announce_interval,
+            announce_jitter_secs,
             max_peer_age,
             max_response_peers,
             store_peer_id,
@@ -1436,7 +1439,16 @@ impl Store {
                 out,
             ),
         };
-        res.map(|(s, l, a, r)| (self.peer_announce_interval, s, l, a, r))
+        res.map(|(s, l, a, r)| {
+            let interval = if self.announce_jitter_secs > 0 {
+                let span = (self.announce_jitter_secs * 2 + 1) as usize;
+                let delta = rng.below(span) as i32 - self.announce_jitter_secs as i32;
+                (self.peer_announce_interval + delta).max(30)
+            } else {
+                self.peer_announce_interval
+            };
+            (interval, s, l, a, r)
+        })
     }
 
     /// Scrape summed across both families.
@@ -1648,7 +1660,7 @@ mod tests {
 
     #[test]
     fn snapshot_roundtrip() {
-        let store = Store::new(16, false, 900, 1800, 50);
+        let store = Store::new(16, false, 900, 0, 1800, 50);
         let mut rng = Rng::new();
         let mut out = Vec::new();
         let hash: InfoHash = [7u8; 20];
@@ -1687,7 +1699,7 @@ mod tests {
         let mut buf = Vec::new();
         store.write_snapshot(&mut buf).unwrap();
 
-        let store2 = Store::new(16, false, 900, 1800, 50);
+        let store2 = Store::new(16, false, 900, 0, 1800, 50);
         let mut cur = std::io::Cursor::new(&buf);
         let (t, p) = store2.load_snapshot(&mut cur).unwrap();
         let after = store2.totals();
@@ -1700,7 +1712,7 @@ mod tests {
 
     #[test]
     fn snapshot_skips_expired() {
-        let store = Store::new(8, false, 900, 1800, 50);
+        let store = Store::new(8, false, 900, 0, 1800, 50);
         let mut rng = Rng::new();
         let mut out = Vec::new();
         let hash: InfoHash = [9u8; 20];
@@ -1719,7 +1731,7 @@ mod tests {
         );
         let mut buf = Vec::new();
         store.write_snapshot(&mut buf).unwrap();
-        let store2 = Store::new(8, false, 900, 1800, 50);
+        let store2 = Store::new(8, false, 900, 0, 1800, 50);
         let mut cur = std::io::Cursor::new(&buf);
         let (_t, p) = store2.load_snapshot(&mut cur).unwrap();
         assert_eq!(p, 0); // expired peer skipped

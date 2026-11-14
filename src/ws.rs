@@ -197,6 +197,9 @@ fn ws_session(
     let mut scratch: Vec<PeerEndpoint> = Vec::with_capacity(256);
     let mut cur: Vec<u8> = Vec::with_capacity(2048);
     let mut in_frag = false;
+    let max_msgs = config.http.websocket_msgs_per_sec;
+    let mut win_start = std::time::Instant::now();
+    let mut win_msgs: u32 = 0;
 
     loop {
         let (fin, opcode, payload) = read_frame(&mut stream)?;
@@ -237,6 +240,16 @@ fn ws_session(
                 in_frag = false;
             }
             _ => continue,
+        }
+        if max_msgs > 0 {
+            if win_start.elapsed() >= Duration::from_secs(1) {
+                win_start = std::time::Instant::now();
+                win_msgs = 0;
+            }
+            win_msgs += 1;
+            if win_msgs > max_msgs {
+                return Err(anyhow!("websocket message rate limit exceeded"));
+            }
         }
         if let Some(resp) = dispatch(
             &cur, ip, peer, config, store, stats, access_list, &mut validator, &mut rng,

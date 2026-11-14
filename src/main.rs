@@ -49,6 +49,7 @@ fn main() -> anyhow::Result<()> {
         shards,
         config.protocol.store_peer_id,
         config.protocol.peer_announce_interval,
+        config.protocol.announce_jitter_secs,
         config.protocol.max_peer_age,
         config.protocol.max_response_peers,
     ));

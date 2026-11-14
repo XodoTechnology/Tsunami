@@ -48,6 +48,10 @@ pub struct NetworkConfig {
 pub struct ProtocolConfig {
     /// Announce interval we tell peers (seconds).
     pub peer_announce_interval: i32,
+    /// Randomize the announced interval by ±this many seconds per response
+    /// (0 = disabled). De-phases announce waves so peers don't all re-announce
+    /// in the same window after a swarm event (new torrent, tracker restart).
+    pub announce_jitter_secs: u32,
     /// Drop peers that haven't announced for this long (seconds).
     pub max_peer_age: u32,
     /// Max peers returned per announce.
@@ -130,6 +134,10 @@ pub struct HttpConfig {
     /// responses (announce/scrape/WS/`/bep15`) always carry full IPs —
     /// peers need them to connect. Set false to expose full IPs.
     pub mask_peer_ips: bool,
+    /// Max complete WebSocket announce messages per connection per second
+    /// (fixed window). Protects the WS endpoint from per-connection floods;
+    /// legit clients send one announce per interval. 0 = unlimited.
+    pub websocket_msgs_per_sec: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,6 +258,7 @@ impl Default for ProtocolConfig {
     fn default() -> Self {
         Self {
             peer_announce_interval: 900,
+            announce_jitter_secs: 0,
             max_peer_age: 1800,
             max_response_peers: 50,
             max_scrape_torrents: 70,
@@ -277,6 +286,7 @@ impl Default for HttpConfig {
             admin_password: String::new(),
             admin_allowlist: Vec::new(),
             mask_peer_ips: true,
+            websocket_msgs_per_sec: 50,
         }
     }
 }
