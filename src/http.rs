@@ -29,6 +29,7 @@ pub fn run_http(
     store: Arc<Store>,
     stats: Arc<Stats>,
     access_list: Arc<AccessList>,
+    i2p_store: Arc<crate::i2p::I2pStore>,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<()>>> {
     let threads = config.http.threads.max(1);
     let max_req = config.http.max_request_bytes.max(1024);
@@ -43,13 +44,14 @@ pub fn run_http(
         let store = store.clone();
         let stats = stats.clone();
         let access_list = access_list.clone();
+        let i2p_store = i2p_store.clone();
         let config = config.clone();
         let validator = validator.clone();
         handles.push(
             std::thread::Builder::new()
                 .name(format!("http-{i:02}"))
                 .spawn(move || {
-                    if let Err(e) = http_thread(config, store, stats, access_list, max_req, validator) {
+                    if let Err(e) = http_thread(config, store, stats, access_list, i2p_store, max_req, validator) {
                         log::error!("http thread {i} died: {e:#}");
                     }
                 })
@@ -73,6 +75,7 @@ fn http_thread(
     store: Arc<Store>,
     stats: Arc<Stats>,
     access_list: Arc<AccessList>,
+    i2p_store: Arc<crate::i2p::I2pStore>,
     max_req: usize,
     validator: Arc<crate::udp::validator::Validator>,
 ) -> anyhow::Result<()> {
@@ -92,6 +95,7 @@ fn http_thread(
                     &store,
                     &stats,
                     &access_list,
+                    &i2p_store,
                     &mut rng,
                     &mut scratch,
                     max_req,
@@ -125,6 +129,7 @@ fn handle_conn(
     store: &Arc<Store>,
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
+    i2p_store: &Arc<crate::i2p::I2pStore>,
     rng: &mut Rng,
     scratch: &mut Vec<PeerEndpoint>,
     max_req: usize,
@@ -240,7 +245,7 @@ fn handle_conn(
     }
 
     let (status, ctype, body) = route(
-        &req, peer, config, store, stats, access_list, rng, scratch,
+        &req, peer, config, store, stats, access_list, i2p_store, rng, scratch,
     );
     let head_len = head.len() as u64;
     let tx_len = body.len() as u64 + 160;
@@ -258,6 +263,7 @@ fn route(
     store: &Arc<Store>,
     stats: &Arc<Stats>,
     access_list: &Arc<AccessList>,
+    i2p_store: &Arc<crate::i2p::I2pStore>,
     rng: &mut Rng,
     scratch: &mut Vec<PeerEndpoint>,
 ) -> Response {
@@ -278,6 +284,10 @@ fn route(
             rng,
             scratch,
         ),
+        "/i2p/announce" if config.i2p.enable => {
+            i2p_announce_http(req.query, config, i2p_store, stats, rng)
+        }
+        "/i2p/scrape" if config.i2p.enable => i2p_scrape_http(req.query, i2p_store),
         "/scrape" => scrape_http(req.query, store, config.http.full_scrape),
         "/api/stats" => (
             200,
@@ -831,6 +841,161 @@ fn announce_http(
         }
         None => (400, "text/plain", b"announce failed".to_vec()),
     }
+}
+
+// ---------------- I2P announce / scrape ----------------
+
+/// Parse a 20-byte parameter sent either raw (BEP-3 style, URL-encoded)
+/// or as 40-char hex — I2P clients more often produce hex.
+fn param_20(v: Option<&[u8]>) -> Option<[u8; 20]> {
+    let v = v?;
+    if v.len() == 20 {
+        let mut out = [0u8; 20];
+        out.copy_from_slice(v);
+        return Some(out);
+    }
+    if v.len() == 40 {
+        return std::str::from_utf8(v)
+            .ok()
+            .and_then(crate::access::parse_infohash_hex);
+    }
+    None
+}
+
+fn i2p_announce_http(
+    query: &str,
+    config: &Config,
+    i2p: &Arc<crate::i2p::I2pStore>,
+    stats: &Arc<Stats>,
+    rng: &mut Rng,
+) -> Response {
+    let params: QueryParams = parse_query(query).into();
+    let Some(info_hash) = param_20(params.get(b"info_hash")) else {
+        return (400, "text/plain", b"missing info_hash".to_vec());
+    };
+    let Some(destination) = params
+        .get_str(b"destination")
+        .filter(|s| crate::i2p::valid_destination(s))
+    else {
+        return (400, "text/plain", b"missing destination".to_vec());
+    };
+    let peer_id = param_20(params.get(b"peer_id")).unwrap_or([0u8; 20]);
+    let left = params.get_i64(b"left").unwrap_or(-1);
+    let event = match params.get_str(b"event").unwrap_or("") {
+        "started" => SwarmEvent::Started,
+        "completed" => SwarmEvent::Completed,
+        "stopped" => SwarmEvent::Stopped,
+        "paused" => SwarmEvent::Paused,
+        _ => SwarmEvent::None,
+    };
+    let numwant = params.get_i64(b"numwant").unwrap_or(-1) as i32;
+
+    if crate::protocol::synthetic_peer_id(&peer_id) {
+        stats.http.blocked.fetch_add(1, Ordering::Relaxed);
+        return (400, "text/plain", b"invalid peer_id".to_vec());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+
+    stats.http.announces.fetch_add(1, Ordering::Relaxed);
+    match event {
+        SwarmEvent::Started => {
+            stats.http.ev_started.fetch_add(1, Ordering::Relaxed);
+        }
+        SwarmEvent::Completed => {
+            stats.http.ev_completed.fetch_add(1, Ordering::Relaxed);
+        }
+        SwarmEvent::Stopped => {
+            stats.http.ev_stopped.fetch_add(1, Ordering::Relaxed);
+        }
+        SwarmEvent::Paused | SwarmEvent::None => {}
+    }
+    if config.protocol.client_stats {
+        stats.client_stats.record(&peer_id);
+    }
+
+    let Some(mut res) =
+        i2p.announce(&info_hash, destination, peer_id, left, event, numwant, now, rng)
+    else {
+        return (400, "text/plain", b"invalid destination".to_vec());
+    };
+
+    res.interval = config.protocol.peer_announce_interval;
+    if config.protocol.announce_jitter_secs > 0 {
+        let span = (config.protocol.announce_jitter_secs * 2 + 1) as usize;
+        let delta = rng.below(span) as i32 - config.protocol.announce_jitter_secs as i32;
+        res.interval = (res.interval + delta).max(30);
+    }
+
+    let mut enc = Encoder::new();
+    enc.dict_begin();
+    enc.dict_int(b"interval", res.interval as i64);
+    enc.dict_int(b"min interval", res.interval as i64);
+    enc.dict_int(b"complete", res.seeders as i64);
+    enc.dict_int(b"incomplete", res.leechers as i64);
+    enc.dict_int(b"downloaders", res.downloaders as i64);
+    enc.dict_raw(
+        b"peers",
+        &{
+            let mut l = Encoder::new();
+            l.list_begin();
+            for (dest, pid) in &res.peers {
+                let mut d = Encoder::new();
+                d.dict_begin();
+                d.dict_bytes(b"destination", dest.as_bytes());
+                let pid_hex = crate::access::infohash_hex(pid);
+                d.dict_bytes(b"peer_id", pid_hex.as_bytes());
+                d.dict_end();
+                l.list_raw(&d.into_vec());
+            }
+            l.list_end();
+            l.into_vec()
+        },
+    );
+    enc.dict_end();
+    (200, "text/plain", enc.into_vec())
+}
+
+fn i2p_scrape_http(query: &str, i2p: &Arc<crate::i2p::I2pStore>) -> Response {
+    let params: QueryParams = parse_query(query).into();
+    let mut hashes: Vec<InfoHash> = Vec::new();
+    for (k, v) in params.0.iter() {
+        if k == b"info_hash" {
+            if let Some(h) = param_20(Some(v)) {
+                hashes.push(h);
+            }
+        }
+    }
+    if hashes.is_empty() {
+        return (400, "text/plain", b"missing info_hash".to_vec());
+    }
+    let stats = i2p.scrape(&hashes);
+    let mut enc = Encoder::new();
+    enc.dict_begin();
+    enc.dict_raw(
+        b"files",
+        &{
+            let mut f = Encoder::new();
+            f.dict_begin();
+            for (h, &(s, l, d)) in hashes.iter().zip(stats.iter()) {
+                let mut d_enc = Encoder::new();
+                d_enc.dict_begin();
+                d_enc.dict_int(b"complete", s as i64);
+                d_enc.dict_int(b"downloaded", 0);
+                d_enc.dict_int(b"downloaders", d as i64);
+                d_enc.dict_int(b"incomplete", l as i64);
+                d_enc.dict_end();
+                f.dict_raw(h, &d_enc.into_vec());
+            }
+            f.dict_end();
+            f.into_vec()
+        },
+    );
+    enc.dict_end();
+    (200, "text/plain", enc.into_vec())
 }
 
 fn build_peer_list(

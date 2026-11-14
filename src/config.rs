@@ -18,6 +18,7 @@ pub struct Config {
     pub scrape_export: ScrapeExportConfig,
     pub snapshot: SnapshotConfig,
     pub ratelimit: RateLimitConfig,
+    pub i2p: I2pConfig,
     pub logging: LoggingConfig,
 }
 
@@ -247,6 +248,22 @@ impl Default for PasskeysConfig {
     }
 }
 
+/// I2P tracker endpoints (`/i2p/announce`, `/i2p/scrape`). I2P has no UDP
+/// and peers are identified by destination keys, not IP addresses — see
+/// docs/I2P.md. Off by default; when enabled the endpoints live on the
+/// regular HTTP listener (the SAM bridge / I2P proxy delivers plain TCP).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct I2pConfig {
+    pub enable: bool,
+}
+
+impl Default for I2pConfig {
+    fn default() -> Self {
+        Self { enable: false }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -267,6 +284,7 @@ impl Default for Config {
             scrape_export: ScrapeExportConfig::default(),
             snapshot: SnapshotConfig::default(),
             ratelimit: RateLimitConfig::default(),
+            i2p: I2pConfig::default(),
             logging: LoggingConfig::default(),
         }
     }

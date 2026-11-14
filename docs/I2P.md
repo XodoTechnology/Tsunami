@@ -1,9 +1,10 @@
 # I2P support — design notes
 
-Status: **research / not implemented**. This document captures what I2P
-support would actually require, so it can be picked up deliberately rather
-than attempted as a config flag. See also greatest-ape/aquatic#248, which
-reached the same conclusion independently.
+Status: **initial implementation on this branch** (`[i2p] enable = true`
+→ `GET /i2p/announce` + `GET /i2p/scrape` on the HTTP listener). See
+"Implemented" below, then "Remaining work" for what is still missing.
+See also greatest-ape/aquatic#248, which reached the same conclusion
+independently.
 
 ## Why it's not a feature flag
 
@@ -36,7 +37,43 @@ I2P side terminates the tunnel before us:
 In both cases the TCP peer address we see is the local router/bridge —
 **useless for peer identity**, which is the whole problem.
 
-## Proposed architecture (if pursued)
+## Implemented (this branch)
+
+A self-contained `src/i2p.rs` module — deliberately *not* the Phase-1
+`PeerAddr` refactor. Rationale: I2P swarms are tiny, so a separate
+`HashMap<InfoHash, HashMap<destination, I2pPeer>>` store behind a single
+`RwLock` costs nothing on the IP hot path and cannot regress the 50M-peer
+design. If I2P volume ever grows, revisit the unified-address refactor.
+
+- `GET /i2p/announce` — params: `info_hash` (raw 20B or 40-hex),
+  `destination` (required, ≤1024 ASCII chars, stored opaquely),
+  `peer_id` (raw or hex), `port` (ignored — I2P has no ports), `left`,
+  `event` (started/completed/stopped/**paused** — BEP-21 semantics kept),
+  `numwant`. Returns a bencoded dict: `interval`, `min interval`,
+  `complete`, `incomplete`, `downloaders`, and `peers` — a list of
+  `{destination, peer_id}` dicts (self excluded, random sample).
+- `GET /i2p/scrape` — repeated `info_hash` params (raw or hex); returns
+  the BEP-48-style `files` dict including `downloaders`.
+- Peer expiry via `max_peer_age`, lazy sweep on announce + periodic
+  `clean()` from the existing cleaner thread.
+- All existing HTTP stats counters apply; synthetic peer_ids rejected.
+
+## Remaining work
+
+1. **Client-format validation** — the `{destination, peer_id}` peer dict
+   is a new convention. Before merge, verify against real I2P BT clients
+   (i2p-bt, qBittorrent-I2P, libtorrent-I2P) what they parse; adjust the
+   response shape to match reality.
+2. **Rate limiting** — no per-IP limits apply (no IPs); add a
+   per-destination token bucket if abused.
+3. **Transport hardening** — optionally bind a dedicated listener for the
+   SAM bridge so I2P traffic is isolated from clearnet HTTP.
+4. **Peer_id requirement** — currently optional (defaults to zeros);
+   tighten if clients always send one.
+5. **The Phase-1 `PeerAddr` refactor** — only if I2P volume ever
+   justifies unifying the stores; not needed at current scope.
+
+## Original analysis (superseded by the standalone-module approach above)
 
 ### Phase 1 — address abstraction (the prerequisite refactor)
 

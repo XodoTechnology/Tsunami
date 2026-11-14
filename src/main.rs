@@ -50,6 +50,10 @@ fn main() -> anyhow::Result<()> {
         .client_stats
         .set_ignore_prefixes(config.protocol.client_stats_ignore.clone());
     let shards = config.network.swarm_shards.max(1).next_power_of_two();
+    let i2p_store = Arc::new(tsunami::i2p::I2pStore::new(
+        config.protocol.max_peer_age,
+        config.protocol.max_response_peers,
+    ));
     let store = Arc::new(Store::new(
         shards,
         config.protocol.store_peer_id,
@@ -117,12 +121,13 @@ fn main() -> anyhow::Result<()> {
             store.clone(),
             stats.clone(),
             access_list.clone(),
+            i2p_store.clone(),
         )?;
         log::info!("http listening on {}", config.http.bind);
     }
 
     // Cleaner threads — each owns a strided subset of shards.
-    spawn_cleaners(&config, &store, &stats);
+    spawn_cleaners(&config, &store, &stats, &i2p_store);
 
     // Maintenance thread: periodic stats logging + scrape export.
     spawn_maintenance(&config, &store, &stats);
@@ -160,7 +165,12 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn spawn_cleaners(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {
+fn spawn_cleaners(
+    config: &Config,
+    store: &Arc<Store>,
+    stats: &Arc<Stats>,
+    i2p_store: &Arc<tsunami::i2p::I2pStore>,
+) {
     let interval = Duration::from_secs(config.cleaning.interval.max(1));
     let nthreads = config.cleaning.threads.max(1);
     let num_shards = config.network.swarm_shards.max(1).next_power_of_two();
@@ -173,6 +183,7 @@ fn spawn_cleaners(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {
     for tid in 0..nthreads {
         let store = store.clone();
         let stats = stats.clone();
+        let i2p_store = i2p_store.clone();
         let indices: Vec<usize> = (tid..num_shards).step_by(nthreads).collect();
         let export_path = export_path.clone();
         std::thread::Builder::new()
@@ -190,6 +201,12 @@ fn spawn_cleaners(config: &Config, store: &Arc<Store>, stats: &Arc<Stats>) {
                     }
                     if tid == 0 {
                         cycle_local += 1;
+                        let (i2p_peers, _) = i2p_store.clean(now);
+                        if i2p_peers > 0 {
+                            stats
+                                .peers_removed
+                                .fetch_add(i2p_peers, Ordering::Relaxed);
+                        }
                         if export_enable
                             && (export_every == 0 || cycle_local % export_every == 0)
                         {

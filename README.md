@@ -21,6 +21,10 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
     the default route, override with `TSUNAMI_PACKET_IFACE`.
 - **HTTP tracker** (BEP 3 announce, BEP 12 scrape), `compact=1` and
   `compact=0` (peer_id echo when enabled).
+- **I2P tracker endpoints** (`[i2p] enable = true`, HTTP-only) —
+  `/i2p/announce` + `/i2p/scrape` for peers identified by I2P destination
+  keys rather than IP addresses. Designed to sit behind the SAM bridge /
+  I2P HTTP proxy. Experimental — see `docs/I2P.md`.
 - **WebSocket tracker** (`ws://host:port/announce`, `/scrape`, `/connect`)
   — BEP-15 binary messages inside WebSocket binary frames, for WebTorrent
   and browser-based peers.
