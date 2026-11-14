@@ -156,7 +156,9 @@ burst = 1.0
 level = "info"
 
 [i2p]
-# I2P BitTorrent tracker endpoints (experimental — see docs/I2P.md).
+# I2P BitTorrent tracker endpoints.
+# EXPERIMENTAL / WORK-IN-PROGRESS: not validated against real I2P torrent
+# clients and not recommended for production — see docs/I2P.md.
 # Peers announce with their I2P Destination in the `ip` parameter instead
 # of an IP address. Enable only if you intend to serve I2P swarms.
 enable = false

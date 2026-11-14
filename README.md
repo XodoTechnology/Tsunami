@@ -21,10 +21,14 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
     the default route, override with `TSUNAMI_PACKET_IFACE`.
 - **HTTP tracker** (BEP 3 announce, BEP 12 scrape), `compact=1` and
   `compact=0` (peer_id echo when enabled).
-- **I2P tracker endpoints** (`[i2p] enable = true`, HTTP-only) —
-  `/i2p/announce` + `/i2p/scrape` for peers identified by I2P destination
-  keys rather than IP addresses. Designed to sit behind the SAM bridge /
-  I2P HTTP proxy. Experimental — see `docs/I2P.md`.
+- **I2P tracker endpoints** (`[i2p] enable = true`, HTTP-only,
+  **experimental / work-in-progress**) — `/i2p/announce`, `/i2p/scrape`,
+  `/i2p/stats`, `/a` for peers identified by I2P destination keys rather
+  than IP addresses. Designed to sit behind the SAM bridge / I2P HTTP
+  proxy or a dedicated `[i2p] listen` port. **Not yet validated against
+  real I2P torrent clients and not recommended for production** — the
+  peer-exchange format follows the I2P spec but interoperability is
+  unproven. See `docs/I2P.md` for status and remaining work.
 - **WebSocket tracker** (`ws://host:port/announce`, `/scrape`, `/connect`)
   — BEP-15 binary messages inside WebSocket binary frames, for WebTorrent
   and browser-based peers.
@@ -106,6 +110,8 @@ with io_uring multishot UDP I/O and `SO_REUSEPORT` workers.
 - BEP-48 HTTP scrape, including full scrape
 - BEP-20 peer_id client identification in stats
 - WebSocket tracker (BEP-15 binary messages in WS frames) for WebTorrent
+- I2P tracker endpoints (destination-keyed peers, HTTP-only) —
+  **experimental, untested against real I2P clients, not for production**
 
 ## Build
 
@@ -204,6 +210,9 @@ Sockets spread across `127/8` loopback aliases for many distinct peers.
 | `ws://host:port/announce` | WebSocket | BEP-15 in WS binary frames |
 | `ws://host:port/scrape` | WebSocket | same |
 | `ws://host:port/connect` | WebSocket | same |
+| `/i2p/announce`, `/a` | I2P announce | **experimental** — `[i2p] enable` |
+| `/i2p/scrape` | I2P scrape | **experimental** |
+| `/i2p/stats` | JSON | I2P swarm totals — **experimental** |
 
 ## Verifying
 
