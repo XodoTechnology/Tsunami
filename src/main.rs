@@ -69,6 +69,9 @@ fn main() -> anyhow::Result<()> {
     // Done before workers bind so restored peers are live immediately.
     if config.snapshot.enable {
         restore_snapshot(&store, &config.snapshot.path);
+        if config.i2p.enable {
+            restore_i2p_snapshot(&i2p_store, i2p_snapshot_path(&config));
+        }
     }
 
     let access_list = Arc::new(AccessList::new(
@@ -135,11 +138,11 @@ fn main() -> anyhow::Result<()> {
 
     // Snapshot thread: periodic peer-state dump (if enabled).
     if config.snapshot.enable {
-        spawn_snapshotter(&config, &store);
+        spawn_snapshotter(&config, &store, &i2p_store);
     }
 
     // SIGINT/SIGTERM -> final snapshot (if enabled) then exit.
-    spawn_shutdown_handler(&config, &store);
+    spawn_shutdown_handler(&config, &store, &i2p_store);
 
     // SIGHUP -> reload access list (only if enabled in config)
     if config.access_list.reload_on_sighup {
@@ -380,12 +383,62 @@ fn write_snapshot_file(store: &Store, path: &std::path::Path) -> anyhow::Result<
     Ok(())
 }
 
+/// I2P peers get their own snapshot file next to the clearnet one
+/// (`tsunami.snap` -> `tsunami.i2p.snap`) so the clearnet format is
+/// untouched.
+fn i2p_snapshot_path(config: &Config) -> std::path::PathBuf {
+    config.snapshot.path.with_extension("i2p.snap")
+}
+
+fn restore_i2p_snapshot(store: &Arc<tsunami::i2p::I2pStore>, path: std::path::PathBuf) {
+    if !path.exists() {
+        return;
+    }
+    let f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("i2p snapshot: cannot open {}: {e}", path.display());
+            return;
+        }
+    };
+    let mut r = std::io::BufReader::with_capacity(1 << 16, f);
+    match store.load_snapshot(&mut r) {
+        Ok((torrents, peers)) => {
+            log::info!(
+                "i2p snapshot: restored {} torrents / {} peers from {}",
+                torrents,
+                peers,
+                path.display()
+            );
+        }
+        Err(e) => log::warn!("i2p snapshot: load failed ({}): {e}", path.display()),
+    }
+}
+
+/// Write the I2P snapshot atomically next to the clearnet one.
+fn write_i2p_snapshot_file(
+    store: &tsunami::i2p::I2pStore,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let f = std::fs::File::create(&tmp)?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 16, f);
+        store.write_snapshot(&mut w)?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Periodically dump peer state. interval_secs == 0 disables periodic dumps
 /// (shutdown snapshot still happens via the signal handler).
-fn spawn_snapshotter(config: &Config, store: &Arc<Store>) {
+fn spawn_snapshotter(config: &Config, store: &Arc<Store>, i2p_store: &Arc<tsunami::i2p::I2pStore>) {
     let interval = Duration::from_secs(config.snapshot.interval_secs);
     let path = config.snapshot.path.clone();
+    let i2p_path = i2p_snapshot_path(config);
+    let i2p_enabled = config.i2p.enable;
     let store = store.clone();
+    let i2p_store = i2p_store.clone();
     std::thread::Builder::new()
         .name("snapshotter".into())
         .spawn(move || {
@@ -406,16 +459,28 @@ fn spawn_snapshotter(config: &Config, store: &Arc<Store>) {
                     }
                     Err(e) => log::warn!("snapshot: write failed: {e:#}"),
                 }
+                if i2p_enabled {
+                    if let Err(e) = write_i2p_snapshot_file(&i2p_store, &i2p_path) {
+                        log::warn!("i2p snapshot: write failed: {e:#}");
+                    }
+                }
             }
         })
         .expect("spawn snapshotter");
 }
 
 /// SIGINT/SIGTERM -> best-effort final snapshot, then exit.
-fn spawn_shutdown_handler(config: &Config, store: &Arc<Store>) {
+fn spawn_shutdown_handler(
+    config: &Config,
+    store: &Arc<Store>,
+    i2p_store: &Arc<tsunami::i2p::I2pStore>,
+) {
     let path = config.snapshot.path.clone();
+    let i2p_path = i2p_snapshot_path(config);
     let enabled = config.snapshot.enable;
+    let i2p_enabled = enabled && config.i2p.enable;
     let store = store.clone();
+    let i2p_store = i2p_store.clone();
     signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM])
         .map(|mut sigs| {
             std::thread::spawn(move || {
@@ -425,6 +490,12 @@ fn spawn_shutdown_handler(config: &Config, store: &Arc<Store>) {
                         match write_snapshot_file(&store, &path) {
                             Ok(()) => log::info!("snapshot: final dump written to {}", path.display()),
                             Err(e) => log::warn!("snapshot: final dump failed: {e:#}"),
+                        }
+                        if i2p_enabled {
+                            match write_i2p_snapshot_file(&i2p_store, &i2p_path) {
+                                Ok(()) => log::info!("i2p snapshot: final dump written to {}", i2p_path.display()),
+                                Err(e) => log::warn!("i2p snapshot: final dump failed: {e:#}"),
+                            }
                         }
                     }
                     std::process::exit(0);

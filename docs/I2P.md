@@ -75,6 +75,15 @@ Endpoints (all gated by `[i2p] enable = true`, off by default):
   `X-I2P-DestHash` (SHA-256 of binary Destination → hash-only identity,
   compact responses only), `X-I2P-DestB32` (base32 Destination, decoded
   and re-encoded to base64). When present they override the `ip` param.
+- `[i2p] enforce_destination = true` requires those headers on every
+  announce (403 otherwise) and ignores the `ip` param entirely — the
+  strict mode the spec recommends for trackers that want to prevent
+  destination spoofing. Note it also rejects clients that announce via
+  the plain I2P HTTP proxy (port 4444), which adds no enforcement
+  headers; only own-tunnel announces pass.
+- Cross-network prevention: any request to an I2P endpoint carrying an
+  `X-Forwarded-For` header is rejected (403) — per the spec, such
+  requests came through an HTTP proxy rather than a dedicated tunnel.
 - Per-destination rate limit: `[i2p] announce_rate` announces/sec
   (fixed window, default 5; 0 = unlimited) → HTTP 429.
 - Optional dedicated listener: `[i2p] listen` binds a separate HTTP port
@@ -104,12 +113,16 @@ Behavior follows the I2P project's BitTorrent tracker documentation:
    and response encodings, but real I2P clients (i2p-bt, qBittorrent-I2P,
    libtorrent-I2P) should be tested end-to-end through a SAM bridge
    before this is considered stable.
-2. **Snapshot coverage** — the I2P store is not included in
-   `[snapshot]` save/restore; I2P peers are lost on restart and re-announce
-   within one interval. Acceptable at current scope; add serialization
-   if I2P deployments need restart persistence.
-3. **Native I2P UDP** — I2P has a separate Datagram3-based UDP announce
-   protocol; not implemented (HTTP-over-SAM covers the common case).
+2. ~~Snapshot coverage~~ — done: I2P peers persist to
+   `<snapshot.path stem>.i2p.snap` on the same schedule as clearnet
+   snapshots (expired peers are skipped on load).
+3. **Native I2P UDP announces** — the Datagram3 spec was finalized
+   2025-06, but requests arrive as I2CP protocol-20 datagrams inside
+   the I2P network. Terminating those requires either an I2P router
+   (i2pd/Java I2P) or SAM v3.3 datagram sessions — which i2pd does not
+   yet implement and libtorrent does not use. Not actionable inside
+   Tsunami today; revisit if SAM v3.3 datagrams see adoption. HTTP
+   announces over the SAM bridge cover all current clients.
 4. **The Phase-1 `PeerAddr` refactor** — only if I2P volume ever
    justifies unifying the stores; not needed at current scope.
 

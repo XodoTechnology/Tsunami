@@ -271,6 +271,120 @@ impl I2pStore {
         let peers: usize = g.values().map(|s| s.len()).sum();
         (g.len(), peers)
     }
+
+    // ---------------- snapshot / restore ----------------
+
+    /// Snapshot magic + format version.
+    const SNAP_MAGIC: &[u8; 8] = b"TSNIM2P\x01";
+
+    /// Serialize the whole store. Format:
+    ///   magic[8] | u32 version | u64 torrent_count |
+    ///   per torrent: info_hash[20] | u32 peer_count |
+    ///   per peer: u16 dest_len | dest utf8 | peer_id[20] | port u16 |
+    ///             left i64 | flags u8 (bit0 seeder, bit1 paused) |
+    ///             last_seen u32 | dest_hash[32]
+    pub fn write_snapshot<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let g = self.inner.read();
+        w.write_all(Self::SNAP_MAGIC)?;
+        w.write_all(&(g.len() as u64).to_le_bytes())?;
+        for (ih, swarm) in g.iter() {
+            w.write_all(ih)?;
+            w.write_all(&(swarm.len() as u32).to_le_bytes())?;
+            for (dest, p) in swarm.iter() {
+                let d = dest.as_bytes();
+                w.write_all(&(d.len() as u16).to_le_bytes())?;
+                w.write_all(d)?;
+                w.write_all(&p.peer_id)?;
+                w.write_all(&p.port.to_le_bytes())?;
+                w.write_all(&p.left.to_le_bytes())?;
+                let flags = (p.seeder as u8) | ((p.paused as u8) << 1);
+                w.write_all(&[flags])?;
+                w.write_all(&p.last_seen.to_le_bytes())?;
+                w.write_all(&p.dest_hash)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore a snapshot written by `write_snapshot`. Peers already older
+    /// than `max_peer_age` are skipped. The rate-limit table is transient
+    /// and not persisted. Returns (torrents, peers) restored.
+    pub fn load_snapshot<R: std::io::Read>(&self, r: &mut R) -> std::io::Result<(u64, u64)> {
+        let mut magic = [0u8; 8];
+        r.read_exact(&mut magic)?;
+        if &magic != Self::SNAP_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad i2p snapshot magic",
+            ));
+        }
+        let mut buf8 = [0u8; 8];
+        r.read_exact(&mut buf8)?;
+        let torrents = u64::from_le_bytes(buf8);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        let cutoff = now.wrapping_sub(self.max_peer_age);
+        let mut restored_t = 0u64;
+        let mut restored_p = 0u64;
+        let mut g = self.inner.write();
+        for _ in 0..torrents {
+            let mut ih = [0u8; 20];
+            r.read_exact(&mut ih)?;
+            let mut buf4 = [0u8; 4];
+            r.read_exact(&mut buf4)?;
+            let count = u32::from_le_bytes(buf4);
+            let mut swarm = HashMap::with_capacity(count as usize);
+            for _ in 0..count {
+                let mut buf2 = [0u8; 2];
+                r.read_exact(&mut buf2)?;
+                let dlen = u16::from_le_bytes(buf2) as usize;
+                let mut dest = vec![0u8; dlen];
+                r.read_exact(&mut dest)?;
+                let Ok(dest) = String::from_utf8(dest) else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "bad i2p snapshot destination",
+                    ));
+                };
+                let mut peer_id = [0u8; 20];
+                r.read_exact(&mut peer_id)?;
+                let mut buf2 = [0u8; 2];
+                r.read_exact(&mut buf2)?;
+                let port = u16::from_le_bytes(buf2);
+                r.read_exact(&mut buf8)?;
+                let left = i64::from_le_bytes(buf8);
+                let mut flags = [0u8; 1];
+                r.read_exact(&mut flags)?;
+                r.read_exact(&mut buf4)?;
+                let last_seen = u32::from_le_bytes(buf4);
+                let mut dest_hash = [0u8; 32];
+                r.read_exact(&mut dest_hash)?;
+                if last_seen <= cutoff {
+                    continue; // already expired
+                }
+                swarm.insert(
+                    dest,
+                    I2pPeer {
+                        peer_id,
+                        port,
+                        left,
+                        seeder: flags[0] & 1 != 0,
+                        paused: flags[0] & 2 != 0,
+                        last_seen,
+                        dest_hash,
+                    },
+                );
+            }
+            if !swarm.is_empty() {
+                restored_p += swarm.len() as u64;
+                g.insert(ih, swarm);
+                restored_t += 1;
+            }
+        }
+        Ok((restored_t, restored_p))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,5 +634,39 @@ mod tests {
         assert!(normalize_destination("not a destination!!!").is_none());
         assert!(normalize_destination("").is_none());
         assert!(normalize_destination(&"A".repeat(50)).is_none()); // too short -> decodes <256B
+    }
+
+    #[test]
+    fn snapshot_roundtrip() {
+        let store = I2pStore::new(100, 50, 0);
+        let mut rng = Rng::new();
+        let ih: InfoHash = [4u8; 20];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        let pid = [8u8; 20];
+        let d1 = normalize_destination(&dest(11)).unwrap();
+        let d2 = normalize_destination(&dest(12)).unwrap();
+        store.announce(&ih, &d1, pid, 6881, 0, AnnounceEvent::Started, 0, dest_hash_of(&d1), now, &mut rng);
+        store.announce(&ih, &d2, pid, 6881, 50, AnnounceEvent::Paused, 0, dest_hash_of(&d2), now, &mut rng);
+
+        let mut buf = Vec::new();
+        store.write_snapshot(&mut buf).unwrap();
+
+        let store2 = I2pStore::new(100, 50, 0);
+        let mut cur = std::io::Cursor::new(&buf);
+        let (t, p) = store2.load_snapshot(&mut cur).unwrap();
+        assert_eq!((t, p), (1, 2));
+        assert_eq!(store2.totals(), (1, 2));
+        // Seeder/paused/leech counts survive the roundtrip: d1 is a
+        // seeder, d2 a paused leecher (counts as incomplete, not downloader).
+        let s = store2.scrape(&[ih]);
+        assert_eq!(s, vec![(1, 1, 0)]);
+        // Bad magic rejected.
+        let mut bad = buf.clone();
+        bad[0] ^= 0xff;
+        let mut cur = std::io::Cursor::new(&bad);
+        assert!(store2.load_snapshot(&mut cur).is_err());
     }
 }

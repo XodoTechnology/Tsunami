@@ -263,6 +263,12 @@ pub struct I2pConfig {
     /// Max announces per destination per second (fixed window).
     /// 0 = unlimited.
     pub announce_rate: u32,
+    /// Require destination enforcement: announces must arrive through an
+    /// I2P tunnel that injects X-I2P-Dest* headers, and the announced
+    /// `ip` parameter is ignored. Prevents destination spoofing; also
+    /// rejects clients that announce via the plain HTTP proxy (they get
+    /// no enforcement headers). Off by default for compatibility.
+    pub enforce_destination: bool,
 }
 
 impl Default for I2pConfig {
@@ -271,6 +277,7 @@ impl Default for I2pConfig {
             enable: false,
             listen: String::new(),
             announce_rate: 5,
+            enforce_destination: false,
         }
     }
 }

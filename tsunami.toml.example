@@ -166,3 +166,7 @@ enable = false
 # listen = "127.0.0.1:8081"
 # Max announces per destination per second (fixed window). 0 = unlimited.
 announce_rate = 5
+# Require tunnel destination-enforcement headers (X-I2P-Dest*) on every
+# announce and ignore the `ip` parameter. Strict anti-spoofing mode —
+# also rejects proxy announces. Off by default for compatibility.
+# enforce_destination = false

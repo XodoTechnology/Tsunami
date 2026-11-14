@@ -252,6 +252,11 @@ fn handle_conn(
     // X-I2P-DestB64/DestHash/DestB32 headers a client cannot spoof. When
     // present they are authoritative over the announce `ip` parameter.
     let i2p_enforce = i2p_dest_header(head);
+    // I2P spec (cross-network prevention): requests carrying
+    // X-Forwarded-For came through an HTTP proxy, not a dedicated I2P
+    // tunnel — reject them on I2P endpoints so clearnet clients cannot
+    // pollute I2P swarms.
+    let i2p_proxied = header_present(head, b"x-forwarded-for");
     let req = match parse_head(head) {
         Some(r) => r,
         None => return write_response(&mut stream, 400, "text/plain", b"bad request"),
@@ -331,7 +336,8 @@ fn handle_conn(
     }
 
     let (status, ctype, body) = route(
-        &req, peer, config, store, stats, access_list, i2p_store, i2p_enforce, rng, scratch,
+        &req, peer, config, store, stats, access_list, i2p_store, i2p_enforce, i2p_proxied,
+        rng, scratch,
     );
     let head_len = head.len() as u64;
     let tx_len = body.len() as u64 + 160;
@@ -351,11 +357,17 @@ fn route(
     access_list: &Arc<AccessList>,
     i2p_store: &Arc<crate::i2p::I2pStore>,
     i2p_enforce: Option<(bool, String)>,
+    i2p_proxied: bool,
     rng: &mut Rng,
     scratch: &mut Vec<PeerEndpoint>,
 ) -> Response {
     if req.method != "GET" && req.method != "HEAD" {
         return (405, "text/plain", b"method not allowed".to_vec());
+    }
+    // Cross-network prevention: no I2P endpoint may be reached via an
+    // HTTP proxy (X-Forwarded-For present).
+    if i2p_proxied && (req.path.starts_with("/i2p/") || req.path == "/a") {
+        return (403, "text/plain", b"proxy access not allowed".to_vec());
     }
     let head_only = req.method == "HEAD";
     let resp = match req.path {
@@ -967,6 +979,21 @@ fn param_20(v: Option<&[u8]>) -> Option<[u8; 20]> {
     None
 }
 
+/// Case-insensitive check for the presence of an HTTP header name.
+/// Matches only at the start of a header line (name immediately followed
+/// by ':'), so header values cannot trigger it.
+fn header_present(head: &[u8], name: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(head) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        let b = line.as_bytes();
+        b.len() > name.len()
+            && b[..name.len()].eq_ignore_ascii_case(name)
+            && b[name.len()] == b':'
+    })
+}
+
 /// Extract the I2P destination-enforcement headers added by the
 /// I2PTunnel HTTP server (unspoofable by clients). Prefers the full
 /// base64 Destination (`X-I2P-DestB64`); falls back to `X-I2P-DestHash`
@@ -1020,6 +1047,10 @@ fn i2p_announce_http(
     };
     if !access_list.allows(&info_hash) {
         return (403, "text/plain", b"forbidden".to_vec());
+    }
+    // Optional strict mode: only tunnel-enforced announces are accepted.
+    if config.i2p.enforce_destination && enforce.is_none() {
+        return (403, "text/plain", b"destination enforcement required".to_vec());
     }
     // Destination identity: unspoofable tunnel header wins; otherwise the
     // spec `ip` parameter (base64 Destination, optional ".i2p"), with
